@@ -21,6 +21,8 @@ const PRICE_URLS = [
 const MIN_FUZZY_LENGTH = 6;
 const MIN_VALID_ENTRIES = 3;
 
+const SEARCH_RESULT_LIMIT = 40;
+
 let byKey = new Map();
 let byTail = new Map();
 let meta = { count: 0, updatedAt: null };
@@ -122,6 +124,49 @@ function setCatalogue(data, updatedAt) {
 
 export function getPriceMeta() {
     return { ...meta };
+}
+
+/**
+ * Search catalogue model keys by substring (case-insensitive).
+ * Ranks tail-segment hits first, then shorter keys, so the most specific
+ * `provider/model` entries surface near the top.
+ * @param {string} query
+ * @param {number} [limit]
+ * @returns {string[]} matching model keys, best first
+ */
+export function searchModels(query, limit = SEARCH_RESULT_LIMIT) {
+    const needle = String(query ?? '').trim().toLowerCase();
+    if (!byKey.size) {
+        return [];
+    }
+    if (!needle) {
+        return [...byKey.keys()].slice(0, limit);
+    }
+
+    const matches = [];
+    for (const key of byKey.keys()) {
+        const index = key.indexOf(needle);
+        if (index === -1) {
+            continue;
+        }
+        const tail = key.split('/').pop();
+        const isTailHit = tail?.includes(needle) ?? false;
+        matches.push({
+            key,
+            tailHit: isTailHit ? 0 : 1,
+            position: index,
+            length: key.length,
+        });
+    }
+
+    matches.sort((a, b) => (
+        a.tailHit - b.tailHit
+        || a.position - b.position
+        || a.length - b.length
+        || a.key.localeCompare(b.key)
+    ));
+
+    return matches.slice(0, limit).map(item => item.key);
 }
 
 export async function loadCached() {

@@ -931,6 +931,7 @@ var PRICE_URLS = [
 ];
 var MIN_FUZZY_LENGTH = 6;
 var MIN_VALID_ENTRIES = 3;
+var SEARCH_RESULT_LIMIT = 40;
 var byKey = /* @__PURE__ */ new Map();
 var byTail = /* @__PURE__ */ new Map();
 var meta = { count: 0, updatedAt: null };
@@ -1016,6 +1017,32 @@ function setCatalogue(data, updatedAt) {
 function getPriceMeta() {
   return { ...meta };
 }
+function searchModels(query, limit = SEARCH_RESULT_LIMIT) {
+  const needle = String(query ?? "").trim().toLowerCase();
+  if (!byKey.size) {
+    return [];
+  }
+  if (!needle) {
+    return [...byKey.keys()].slice(0, limit);
+  }
+  const matches = [];
+  for (const key of byKey.keys()) {
+    const index = key.indexOf(needle);
+    if (index === -1) {
+      continue;
+    }
+    const tail = key.split("/").pop();
+    const isTailHit = tail?.includes(needle) ?? false;
+    matches.push({
+      key,
+      tailHit: isTailHit ? 0 : 1,
+      position: index,
+      length: key.length
+    });
+  }
+  matches.sort((a, b) => a.tailHit - b.tailHit || a.position - b.position || a.length - b.length || a.key.localeCompare(b.key));
+  return matches.slice(0, limit).map((item) => item.key);
+}
 async function loadCached() {
   try {
     const cached = await idbGet(CACHE_KEY);
@@ -1095,6 +1122,130 @@ function computeCost({ input, output, model, rate = 1 }) {
   return { found: true, cost: usd * (Number(rate) || 1), usd, price };
 }
 
+// src/combo.js
+var MAX_OPTIONS = 40;
+var MAX_OPTION_HEIGHT = 220;
+var seq2 = 0;
+function escapeHtml(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function createList() {
+  const list = document.createElement("div");
+  list.className = "tm-combo-list tm-hidden";
+  list.id = `tm_combo_list_${++seq2}`;
+  document.body.appendChild(list);
+  return list;
+}
+function renderOptions(list, options, activeIndex) {
+  if (options.length === 0) {
+    list.innerHTML = '<div class="tm-combo-empty">价格库中无匹配模型</div>';
+    return;
+  }
+  list.innerHTML = options.map((model, index) => {
+    const label = escapeHtml(model);
+    const className = index === activeIndex ? "tm-combo-option tm-active" : "tm-combo-option";
+    return `<div class="${className}" data-model="${label}">${label}</div>`;
+  }).join("");
+}
+function positionList(input, list) {
+  const rect = input.getBoundingClientRect();
+  const below = window.innerHeight - rect.bottom;
+  const height = Math.min(MAX_OPTION_HEIGHT, list.scrollHeight);
+  list.style.left = `${rect.left}px`;
+  list.style.width = `${rect.width}px`;
+  list.style.maxHeight = `${height}px`;
+  if (below < height && rect.top > below) {
+    list.style.top = "auto";
+    list.style.bottom = `${window.innerHeight - rect.top}px`;
+  } else {
+    list.style.bottom = "auto";
+    list.style.top = `${rect.bottom + 2}px`;
+  }
+}
+function attachModelCombo(input, { onCommit } = {}) {
+  const list = createList();
+  let matches = [];
+  let activeIndex = -1;
+  const onWindowChange = () => close();
+  input.setAttribute("autocomplete", "off");
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-expanded", "false");
+  input.setAttribute("aria-controls", list.id);
+  input.setAttribute("aria-autocomplete", "list");
+  function open() {
+    positionList(input, list);
+    list.classList.remove("tm-hidden");
+    input.setAttribute("aria-expanded", "true");
+  }
+  function close() {
+    list.classList.add("tm-hidden");
+    input.setAttribute("aria-expanded", "false");
+    activeIndex = -1;
+  }
+  function commit(value) {
+    input.value = value;
+    close();
+    onCommit?.(value.trim());
+  }
+  function refresh() {
+    matches = searchModels(input.value).slice(0, MAX_OPTIONS);
+    activeIndex = matches.length ? 0 : -1;
+    renderOptions(list, matches, activeIndex);
+    open();
+  }
+  function selectActive() {
+    if (activeIndex < 0 || activeIndex >= matches.length) {
+      return;
+    }
+    commit(matches[activeIndex]);
+  }
+  function move(step) {
+    if (matches.length === 0) {
+      return;
+    }
+    activeIndex = (activeIndex + step + matches.length) % matches.length;
+    renderOptions(list, matches, activeIndex);
+    list.querySelector(".tm-active")?.scrollIntoView({ block: "nearest" });
+  }
+  input.addEventListener("input", refresh);
+  input.addEventListener("focus", refresh);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      move(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      move(-1);
+    } else if (event.key === "Enter") {
+      if (!list.classList.contains("tm-hidden")) {
+        event.preventDefault();
+        event.stopPropagation();
+        selectActive();
+      }
+    } else if (event.key === "Escape") {
+      close();
+    }
+  });
+  list.addEventListener("mousedown", (event) => {
+    const option = event.target.closest(".tm-combo-option");
+    if (!option) {
+      return;
+    }
+    event.preventDefault();
+    commit(option.dataset.model);
+  });
+  input.addEventListener("blur", close);
+  window.addEventListener("resize", onWindowChange);
+  window.addEventListener("scroll", onWindowChange, true);
+  function destroy() {
+    close();
+    window.removeEventListener("resize", onWindowChange);
+    window.removeEventListener("scroll", onWindowChange, true);
+    list.remove();
+  }
+  return { close, refresh, destroy };
+}
+
 // src/panel.js
 var MODULE_NAME = "token_monitor";
 var PANEL_ID = "token_monitor_panel";
@@ -1105,13 +1256,17 @@ var AUX_LABELS = { plot: "剧情推进", fill: "填表", other: "其他" };
 var AUX_BADGE = { plot: "P", fill: "F", other: "O" };
 var defaultSettings = Object.freeze({
   mainGenModel: "",
+  plotModel: "",
+  fillModel: "",
   rate: 1,
   classifyMode: "auto",
   panelVisible: false,
   panelPosition: null,
   collapsed: false
 });
+var AUX_MODEL_SETTINGS = { plot: "plotModel", fill: "fillModel", other: "fillModel" };
 var bound = false;
+var combos = [];
 function ctx4() {
   return globalThis.SillyTavern?.getContext();
 }
@@ -1190,7 +1345,7 @@ function formatCost(value, rate) {
   const digits = Math.abs(value) > 0 && Math.abs(value) < 0.01 ? 4 : 2;
   return `${symbol}${value.toFixed(digits)}`;
 }
-function escapeHtml(value) {
+function escapeHtml2(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 function setText(id, text) {
@@ -1199,7 +1354,7 @@ function setText(id, text) {
     element.textContent = text;
   }
 }
-function categoryCost(category, rate) {
+function categoryCost(category, rate, fallbackModel) {
   const models = Object.entries(category?.byModel ?? {});
   if (models.length === 0) {
     return { cost: null, unknown: (category?.input ?? 0) > 0 || (category?.output ?? 0) > 0 };
@@ -1207,16 +1362,24 @@ function categoryCost(category, rate) {
   let cost = 0;
   let anyFound = false;
   let unknown = false;
+  let pricedAtFallback = false;
   for (const [model, value] of models) {
     const result = computeCost({ input: value.input, output: value.output, model, rate });
     if (result.found) {
       cost += result.cost;
       anyFound = true;
+      continue;
+    }
+    const fallback = fallbackModel ? computeCost({ input: value.input, output: value.output, model: fallbackModel, rate }) : { found: false };
+    if (fallback.found) {
+      cost += fallback.cost;
+      anyFound = true;
+      pricedAtFallback = true;
     } else {
       unknown = true;
     }
   }
-  return { cost: anyFound ? cost : null, unknown };
+  return { cost: anyFound ? cost : null, unknown, fallback: pricedAtFallback };
 }
 function addMenuEntry() {
   if (document.getElementById(MENU_ID)) {
@@ -1279,6 +1442,12 @@ function buildPanelSkeleton() {
                 <div class="tm-settings-body tm-hidden" id="tm-settings-body">
                     <label class="tm-field">主生成模型
                         <input id="tm-set-model" class="text_pole" type="text" placeholder="留空则自动读取当前模型">
+                    </label>
+                    <label class="tm-field">剧情推进模型
+                        <input id="tm-set-plot-model" class="text_pole" type="text" placeholder="留空则用拦截到的模型名">
+                    </label>
+                    <label class="tm-field">填表模型（含其他）
+                        <input id="tm-set-fill-model" class="text_pole" type="text" placeholder="留空则用拦截到的模型名">
                     </label>
                     <label class="tm-field">汇率（rate=1 时按美元直显）
                         <input id="tm-set-rate" class="text_pole" type="number" min="0" step="0.01">
@@ -1368,21 +1537,31 @@ function bindSettingsInputs() {
   const settings = getSettings();
   const markers = loadMarkers();
   const modelInput = document.getElementById("tm-set-model");
+  const plotModelInput = document.getElementById("tm-set-plot-model");
+  const fillModelInput = document.getElementById("tm-set-fill-model");
   const rateInput = document.getElementById("tm-set-rate");
   const modeSelect = document.getElementById("tm-set-mode");
   const plotMarkers = document.getElementById("tm-set-plot-markers");
   const fillMarkers = document.getElementById("tm-set-fill-markers");
   modelInput.value = settings.mainGenModel ?? "";
+  plotModelInput.value = settings.plotModel ?? "";
+  fillModelInput.value = settings.fillModel ?? "";
   rateInput.value = String(settings.rate ?? 1);
   modeSelect.value = settings.classifyMode ?? "auto";
   plotMarkers.value = markers.plotMarkers.join("\n");
   fillMarkers.value = markers.fillMarkers.join("\n");
-  modelInput.addEventListener("input", () => {
+  const onModelChanged = (key) => (value) => {
     const current = getSettings();
-    current.mainGenModel = modelInput.value.trim();
+    current[key] = value;
     saveSettings();
     refreshPanel();
-  });
+  };
+  const modelCommit = {
+    "tm-set-model": onModelChanged("mainGenModel"),
+    "tm-set-plot-model": onModelChanged("plotModel"),
+    "tm-set-fill-model": onModelChanged("fillModel")
+  };
+  combos = [modelInput, plotModelInput, fillModelInput].map((input) => attachModelCombo(input, { onCommit: modelCommit[input.id] }));
   rateInput.addEventListener("input", () => {
     const current = getSettings();
     current.rate = Number(rateInput.value) || 1;
@@ -1469,7 +1648,7 @@ function buildBadges(aux) {
       continue;
     }
     const title = `${AUX_LABELS[category]}: ${data.calls}次 · in ${formatNumber(data.input)} · out ${formatNumber(data.output)}`;
-    badges.push(`<span class="tm-badge tm-badge-${category}" title="${escapeHtml(title)}">${AUX_BADGE[category]}${data.calls}</span>`);
+    badges.push(`<span class="tm-badge tm-badge-${category}" title="${escapeHtml2(title)}">${AUX_BADGE[category]}${data.calls}</span>`);
   }
   return badges.join("") || "—";
 }
@@ -1491,7 +1670,7 @@ function renderMessages() {
     rows.push(`
             <div class="tm-message-row" data-index="${index}">
                 <span class="tm-message-index">${index + 1}</span>
-                <span class="tm-message-role" title="${escapeHtml(role)}">${escapeHtml(role)}</span>
+                <span class="tm-message-role" title="${escapeHtml2(role)}">${escapeHtml2(role)}</span>
                 <span class="tm-message-in">${input === null ? "—" : formatNumber(input)}</span>
                 <span class="tm-message-out">${output === null ? "—" : formatNumber(output)}</span>
                 <span class="tm-message-aux">${buildBadges(data?.aux)}</span>
@@ -1510,19 +1689,21 @@ function renderMessages() {
     });
   });
 }
-function renderAux(summary, rate) {
+function renderAux(summary, rate, settings) {
   const container = document.getElementById("tm-aux");
   if (!container) {
     return;
   }
   container.innerHTML = Object.keys(AUX_LABELS).map((category) => {
     const data = summary.aux[category];
-    const { cost, unknown } = categoryCost(data, rate);
+    const fallbackModel = settings[AUX_MODEL_SETTINGS[category]] ?? "";
+    const { cost, unknown, fallback } = categoryCost(data, rate, fallbackModel);
     const costText = cost === null ? "—" : `${formatCost(cost, rate)}${unknown ? "*" : ""}`;
+    const modelNote = fallback ? ` <i>按 ${escapeHtml2(fallbackModel)} 计价</i>` : "";
     return `
             <div class="tm-row tm-aux-row">
                 <span class="tm-label">${AUX_LABELS[category]}</span>
-                <span class="tm-aux-metrics">${data.calls}次 · in ${formatNumber(data.input)} · out ${formatNumber(data.output)} · <b>${costText}</b></span>
+                <span class="tm-aux-metrics">${data.calls}次 · in ${formatNumber(data.input)} · out ${formatNumber(data.output)} · <b>${costText}</b>${modelNote}</span>
             </div>`;
   }).join("");
 }
@@ -1541,7 +1722,7 @@ function refreshPanel() {
   setText("tm-main-total", `total ${formatNumber(summary.total)}`);
   setText("tm-main-cost", mainResult.found ? formatCost(mainResult.cost, rate) : "—");
   setText("tm-main-model", model ? `模型：${model}` : "未设置模型（不计算主生成成本）");
-  renderAux(summary, rate);
+  renderAux(summary, rate, settings);
   renderMessages();
   updatePriceStatus();
 }
@@ -1604,6 +1785,10 @@ function mountPanel() {
 }
 function unmountPanel() {
   bound = false;
+  for (const combo of combos) {
+    combo.destroy();
+  }
+  combos = [];
   document.getElementById(PANEL_ID)?.remove();
   document.getElementById(MENU_ID)?.remove();
   document.getElementById(FAB_ID)?.remove();

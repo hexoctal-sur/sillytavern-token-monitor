@@ -7,6 +7,7 @@
 import { computeChatSummary, getMessageTokens, recomputeChat, clearChatTokenData } from './store.js';
 import { setMarkerConfig, rescanAuxFrames } from './interceptor.js';
 import { getPriceMeta, updatePrices, computeCost } from './pricing.js';
+import { attachModelCombo } from './combo.js';
 
 const MODULE_NAME = 'token_monitor';
 const PANEL_ID = 'token_monitor_panel';
@@ -19,6 +20,8 @@ const AUX_BADGE = { plot: 'P', fill: 'F', other: 'O' };
 
 const defaultSettings = Object.freeze({
     mainGenModel: '',
+    plotModel: '',
+    fillModel: '',
     rate: 1,
     classifyMode: 'auto',
     panelVisible: false,
@@ -26,7 +29,10 @@ const defaultSettings = Object.freeze({
     collapsed: false,
 });
 
+const AUX_MODEL_SETTINGS = { plot: 'plotModel', fill: 'fillModel', other: 'fillModel' };
+
 let bound = false;
+let combos = [];
 
 function ctx() {
     return globalThis.SillyTavern?.getContext();
@@ -148,7 +154,12 @@ function setText(id, text) {
  * Cost helpers
  * ------------------------------------------------------------------ */
 
-function categoryCost(category, rate) {
+/**
+ * Cost of an aux category, priced per captured model with the configured
+ * override (剧情推进/填表 usually use a model other than the main one) as
+ * fallback when the captured name is unknown to the catalogue.
+ */
+function categoryCost(category, rate, fallbackModel) {
     const models = Object.entries(category?.byModel ?? {});
     if (models.length === 0) {
         return { cost: null, unknown: (category?.input ?? 0) > 0 || (category?.output ?? 0) > 0 };
@@ -157,18 +168,29 @@ function categoryCost(category, rate) {
     let cost = 0;
     let anyFound = false;
     let unknown = false;
+    let pricedAtFallback = false;
 
     for (const [model, value] of models) {
         const result = computeCost({ input: value.input, output: value.output, model, rate });
         if (result.found) {
             cost += result.cost;
             anyFound = true;
+            continue;
+        }
+
+        const fallback = fallbackModel
+            ? computeCost({ input: value.input, output: value.output, model: fallbackModel, rate })
+            : { found: false };
+        if (fallback.found) {
+            cost += fallback.cost;
+            anyFound = true;
+            pricedAtFallback = true;
         } else {
             unknown = true;
         }
     }
 
-    return { cost: anyFound ? cost : null, unknown };
+    return { cost: anyFound ? cost : null, unknown, fallback: pricedAtFallback };
 }
 
 /* ------------------------------------------------------------------ *
@@ -239,6 +261,12 @@ function buildPanelSkeleton() {
                 <div class="tm-settings-body tm-hidden" id="tm-settings-body">
                     <label class="tm-field">主生成模型
                         <input id="tm-set-model" class="text_pole" type="text" placeholder="留空则自动读取当前模型">
+                    </label>
+                    <label class="tm-field">剧情推进模型
+                        <input id="tm-set-plot-model" class="text_pole" type="text" placeholder="留空则用拦截到的模型名">
+                    </label>
+                    <label class="tm-field">填表模型（含其他）
+                        <input id="tm-set-fill-model" class="text_pole" type="text" placeholder="留空则用拦截到的模型名">
                     </label>
                     <label class="tm-field">汇率（rate=1 时按美元直显）
                         <input id="tm-set-rate" class="text_pole" type="number" min="0" step="0.01">
@@ -338,23 +366,34 @@ function bindSettingsInputs() {
     const markers = loadMarkers();
 
     const modelInput = document.getElementById('tm-set-model');
+    const plotModelInput = document.getElementById('tm-set-plot-model');
+    const fillModelInput = document.getElementById('tm-set-fill-model');
     const rateInput = document.getElementById('tm-set-rate');
     const modeSelect = document.getElementById('tm-set-mode');
     const plotMarkers = document.getElementById('tm-set-plot-markers');
     const fillMarkers = document.getElementById('tm-set-fill-markers');
 
     modelInput.value = settings.mainGenModel ?? '';
+    plotModelInput.value = settings.plotModel ?? '';
+    fillModelInput.value = settings.fillModel ?? '';
     rateInput.value = String(settings.rate ?? 1);
     modeSelect.value = settings.classifyMode ?? 'auto';
     plotMarkers.value = markers.plotMarkers.join('\n');
     fillMarkers.value = markers.fillMarkers.join('\n');
 
-    modelInput.addEventListener('input', () => {
+    const onModelChanged = key => value => {
         const current = getSettings();
-        current.mainGenModel = modelInput.value.trim();
+        current[key] = value;
         saveSettings();
         refreshPanel();
-    });
+    };
+
+    const modelCommit = {
+        'tm-set-model': onModelChanged('mainGenModel'),
+        'tm-set-plot-model': onModelChanged('plotModel'),
+        'tm-set-fill-model': onModelChanged('fillModel'),
+    };
+    combos = [modelInput, plotModelInput, fillModelInput].map(input => attachModelCombo(input, { onCommit: modelCommit[input.id] }));
 
     rateInput.addEventListener('input', () => {
         const current = getSettings();
@@ -500,7 +539,7 @@ function renderMessages() {
     });
 }
 
-function renderAux(summary, rate) {
+function renderAux(summary, rate, settings) {
     const container = document.getElementById('tm-aux');
     if (!container) {
         return;
@@ -508,12 +547,14 @@ function renderAux(summary, rate) {
 
     container.innerHTML = Object.keys(AUX_LABELS).map(category => {
         const data = summary.aux[category];
-        const { cost, unknown } = categoryCost(data, rate);
+        const fallbackModel = settings[AUX_MODEL_SETTINGS[category]] ?? '';
+        const { cost, unknown, fallback } = categoryCost(data, rate, fallbackModel);
         const costText = cost === null ? '—' : `${formatCost(cost, rate)}${unknown ? '*' : ''}`;
+        const modelNote = fallback ? ` <i>按 ${escapeHtml(fallbackModel)} 计价</i>` : '';
         return `
             <div class="tm-row tm-aux-row">
                 <span class="tm-label">${AUX_LABELS[category]}</span>
-                <span class="tm-aux-metrics">${data.calls}次 · in ${formatNumber(data.input)} · out ${formatNumber(data.output)} · <b>${costText}</b></span>
+                <span class="tm-aux-metrics">${data.calls}次 · in ${formatNumber(data.input)} · out ${formatNumber(data.output)} · <b>${costText}</b>${modelNote}</span>
             </div>`;
     }).join('');
 }
@@ -539,7 +580,7 @@ export function refreshPanel() {
     setText('tm-main-cost', mainResult.found ? formatCost(mainResult.cost, rate) : '—');
     setText('tm-main-model', model ? `模型：${model}` : '未设置模型（不计算主生成成本）');
 
-    renderAux(summary, rate);
+    renderAux(summary, rate, settings);
     renderMessages();
     updatePriceStatus();
 }
@@ -620,6 +661,10 @@ export function mountPanel() {
 
 export function unmountPanel() {
     bound = false;
+    for (const combo of combos) {
+        combo.destroy();
+    }
+    combos = [];
     document.getElementById(PANEL_ID)?.remove();
     document.getElementById(MENU_ID)?.remove();
     document.getElementById(FAB_ID)?.remove();
