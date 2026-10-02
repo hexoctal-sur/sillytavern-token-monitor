@@ -1,0 +1,283 @@
+/* Token Monitor extension styles */
+
+/* ---------- menu entry / fallback button ---------- */
+
+#token_monitor_menu_entry {
+    cursor: pointer;
+}
+
+#token_monitor_fab {
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    z-index: 30000;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    cursor: pointer;
+    background: var(--SmartThemeBlurTintColor, rgba(20, 20, 24, 0.92));
+    color: var(--SmartThemeBodyColor, #eaeaea);
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+/* ---------- panel ---------- */
+
+#token_monitor_panel {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    width: 360px;
+    max-height: 68vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--SmartThemeBlurTintColor, rgba(20, 20, 24, 0.94));
+    color: var(--SmartThemeBodyColor, #eaeaea);
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+    border-radius: 10px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+    z-index: 30000;
+    font-size: 12px;
+    line-height: 1.4;
+    overflow: hidden;
+    user-select: none;
+}
+
+#token_monitor_panel.tm-hidden {
+    display: none;
+}
+
+#token_monitor_panel.tm-collapsed .tm-body {
+    display: none;
+}
+
+#token_monitor_panel .tm-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    cursor: move;
+    background: rgba(255, 255, 255, 0.06);
+    font-weight: 600;
+}
+
+#token_monitor_panel .tm-title {
+    font-size: 13px;
+}
+
+#token_monitor_panel .tm-header-actions {
+    display: flex;
+    gap: 10px;
+}
+
+#token_monitor_panel .tm-icon {
+    cursor: pointer;
+    opacity: 0.7;
+    padding: 2px;
+}
+
+#token_monitor_panel .tm-icon:hover {
+    opacity: 1;
+}
+
+#token_monitor_panel .tm-body {
+    padding: 8px 10px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    overflow: hidden;
+    min-height: 0;
+}
+
+#token_monitor_panel .tm-main {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+#token_monitor_panel .tm-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+#token_monitor_panel .tm-label {
+    opacity: 0.75;
+    white-space: nowrap;
+}
+
+#token_monitor_panel .tm-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+}
+
+#token_monitor_panel .tm-sub {
+    display: flex;
+    gap: 12px;
+    opacity: 0.8;
+    font-variant-numeric: tabular-nums;
+}
+
+#token_monitor_panel .tm-hint {
+    opacity: 0.55;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#token_monitor_panel .tm-aux {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding-top: 6px;
+}
+
+#token_monitor_panel .tm-aux-metrics {
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+#token_monitor_panel .tm-list {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding-top: 4px;
+}
+
+#token_monitor_panel .tm-messages-head,
+#token_monitor_panel .tm-message-row {
+    display: grid;
+    grid-template-columns: 28px 1fr 50px 50px 66px;
+    gap: 4px;
+    align-items: center;
+    padding: 3px 2px;
+    font-variant-numeric: tabular-nums;
+}
+
+#token_monitor_panel .tm-messages-head {
+    font-weight: 600;
+    opacity: 0.7;
+}
+
+#token_monitor_panel .tm-messages {
+    overflow-y: auto;
+    min-height: 40px;
+    max-height: 26vh;
+}
+
+#token_monitor_panel .tm-message-row {
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+#token_monitor_panel .tm-message-row:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+#token_monitor_panel .tm-message-role {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#token_monitor_panel .tm-message-in,
+#token_monitor_panel .tm-message-out {
+    text-align: right;
+    opacity: 0.85;
+}
+
+#token_monitor_panel .tm-message-aux {
+    display: flex;
+    gap: 3px;
+    justify-content: flex-end;
+}
+
+#token_monitor_panel .tm-badge {
+    display: inline-block;
+    padding: 0 4px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.14);
+}
+
+#token_monitor_panel .tm-badge-plot {
+    background: rgba(76, 175, 80, 0.35);
+}
+
+#token_monitor_panel .tm-badge-fill {
+    background: rgba(33, 150, 243, 0.35);
+}
+
+#token_monitor_panel .tm-badge-other {
+    background: rgba(158, 158, 158, 0.35);
+}
+
+#token_monitor_panel .tm-empty {
+    padding: 8px 2px;
+    opacity: 0.6;
+    text-align: center;
+}
+
+#token_monitor_panel .tm-settings {
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding-top: 4px;
+}
+
+#token_monitor_panel .tm-settings-head {
+    display: flex;
+    justify-content: space-between;
+    cursor: pointer;
+    font-weight: 600;
+    opacity: 0.85;
+    padding: 2px 0;
+}
+
+#token_monitor_panel .tm-settings-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 6px;
+    max-height: 34vh;
+    overflow-y: auto;
+}
+
+#token_monitor_panel .tm-settings-body.tm-hidden {
+    display: none;
+}
+
+#token_monitor_panel .tm-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    opacity: 0.9;
+}
+
+#token_monitor_panel .tm-field input,
+#token_monitor_panel .tm-field select,
+#token_monitor_panel .tm-field textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 12px;
+}
+
+#token_monitor_panel .tm-price-status {
+    opacity: 0.7;
+    font-size: 11px;
+}
+
+#token_monitor_panel .tm-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+#token_monitor_panel .menu_button.disabled {
+    opacity: 0.5;
+    pointer-events: none;
+}

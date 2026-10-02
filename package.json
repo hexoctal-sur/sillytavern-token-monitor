@@ -1,0 +1,14 @@
+{
+    "name": "sillytavern-token-monitor",
+    "version": "0.2.0",
+    "private": true,
+    "type": "module",
+    "description": "SillyTavern extension that tracks per-message token usage and auxiliary AI calls, with cost estimation.",
+    "scripts": {
+        "build": "node esbuild.config.mjs",
+        "watch": "node esbuild.config.mjs --watch"
+    },
+    "devDependencies": {
+        "esbuild": "^0.24.0"
+    }
+}
