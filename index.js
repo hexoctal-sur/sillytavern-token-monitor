@@ -3,7 +3,6 @@
 // src/tokens.js
 var QUIET_TYPES = /* @__PURE__ */ new Set(["quiet"]);
 var TOKEN_CACHE_MAX = 400;
-var ESTIMATE_CHARS_PER_TOKEN = 1.5;
 var tokenCache = /* @__PURE__ */ new Map();
 var pendingGenType = null;
 function ctx() {
@@ -61,13 +60,36 @@ async function countTokensCached(text) {
   }
   return count;
 }
+async function countMessageTokens(message) {
+  if (typeof message === "string") {
+    return countTokensCached(message);
+  }
+  let total = 0;
+  const content = message?.content ?? "";
+  if (typeof content === "string") {
+    total += await countTokensCached(content) ?? 0;
+  } else if (Array.isArray(content)) {
+    for (const part of content) {
+      if (typeof part?.text === "string") {
+        total += await countTokensCached(part.text) ?? 0;
+      }
+    }
+  } else if (content != null) {
+    total += await countTokensCached(JSON.stringify(content)) ?? 0;
+  }
+  if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+    total += await countTokensCached(JSON.stringify(message.tool_calls)) ?? 0;
+  }
+  if (typeof message?.name === "string" && message.name) {
+    total += await countTokensCached(message.name) ?? 0;
+  }
+  return total;
+}
 async function countMsgTokens(messages) {
   let total = 0;
   for (const message of messages ?? []) {
-    const raw = typeof message === "string" ? message : message?.content ?? "";
-    const text = typeof raw === "string" ? raw : JSON.stringify(raw ?? "");
-    const count = await countTokensCached(text);
-    total += count !== null ? count : Math.ceil(text.length / ESTIMATE_CHARS_PER_TOKEN);
+    const count = await countMessageTokens(message);
+    total += count !== null ? count : 0;
   }
   return total;
 }
@@ -106,6 +128,14 @@ function toNumber(value) {
 }
 function isTrackable(message) {
   return Boolean(message) && typeof message === "object" && message.is_system !== true && typeof message.mes === "string";
+}
+function ownTextOf(message) {
+  const mes = typeof message?.mes === "string" ? message.mes : "";
+  if (message?.is_user === true) {
+    return mes;
+  }
+  const reasoning = message?.extra?.reasoning;
+  return `${typeof reasoning === "string" ? reasoning : ""}${mes}`;
 }
 function emptyCategory() {
   return { calls: 0, input: 0, output: 0, byModel: {} };
@@ -265,7 +295,7 @@ async function updateMessageTokens(message, { input, output } = {}) {
     return null;
   }
   const existing = getMessageTokens(message) ?? {};
-  const own = await countTextAsync(message.mes);
+  const own = await countTextAsync(ownTextOf(message));
   const isUser = message.is_user === true;
   const resolvedInput = input !== void 0 ? input : isUser ? own : existing.input ?? null;
   const resolvedOutput = output !== void 0 ? output : isUser ? 0 : own;
@@ -282,7 +312,7 @@ async function recomputeChat() {
       continue;
     }
     const existing = getMessageTokens(message) ?? {};
-    const own = await countTextAsync(message.mes);
+    const own = await countTextAsync(ownTextOf(message));
     const isUser = message.is_user === true;
     const input = isUser ? own : existing.input ?? null;
     const output = isUser ? 0 : own;
@@ -299,7 +329,7 @@ async function recomputeChat() {
     if (!isTrackable(message)) {
       continue;
     }
-    const own = await countTextAsync(message.mes);
+    const own = await countTextAsync(ownTextOf(message));
     if (own !== null) {
       entry.output = own;
     }
@@ -704,7 +734,7 @@ function collectSameOriginWindows(rootDocument, result) {
   });
   return result;
 }
-function patchWindow(win) {
+function patchWindow(win, isMainWindow = false) {
   if (!win || win.__tokenMonitorAuxHooked) {
     return;
   }
@@ -713,7 +743,7 @@ function patchWindow(win) {
   }
   const original = win.fetch.bind(win);
   patchedWindows.set(win, win.fetch);
-  win.fetch = createWrappedFetch(original);
+  win.fetch = createWrappedFetch(original, isMainWindow);
   win.__tokenMonitorAuxHooked = true;
 }
 function pruneClosedWindows() {
@@ -833,24 +863,22 @@ async function readSse(response) {
   }
   return { text, usage };
 }
-function collectResponse(response, record) {
+function collectResponse(response, onDone) {
   const clone = response.clone();
   const contentType = clone.headers?.get?.("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
-    void readSse(clone).then(({ text, usage }) => {
-      record.responseText = text;
-      record.usage = usage;
-      ingest(record);
-    }).catch(() => ingest(record));
+    void readSse(clone).then(({ text, usage }) => onDone({ text, usage })).catch(() => onDone({ text: "", usage: null }));
     return;
   }
   void clone.json().then((payload) => {
-    record.usage = payload?.usage ?? null;
-    record.responseText = payload?.choices?.[0]?.message?.content ?? "";
-    ingest(record);
-  }).catch(() => ingest(record));
+    const content = payload?.choices?.[0]?.message?.content;
+    onDone({
+      text: typeof content === "string" ? content : content == null ? "" : JSON.stringify(content),
+      usage: payload?.usage ?? null
+    });
+  }).catch(() => onDone({ text: "", usage: null }));
 }
-function createWrappedFetch(original) {
+function createWrappedFetch(original, isMainWindow) {
   return async function tokenMonitorFetch(input, init) {
     const url = typeof input === "string" ? input : input?.url ?? "";
     let body = null;
@@ -863,7 +891,8 @@ function createWrappedFetch(original) {
       body = null;
     }
     const interceptable = isGenerateUrl(url) && body && Array.isArray(body.messages) && body.messages.length > 0;
-    const record = interceptable ? {
+    const mainCapture = isMainWindow && interceptable && typeof globalThis.__tokenMonitorClaimMainFetch === "function" && globalThis.__tokenMonitorClaimMainFetch() ? { model: typeof body.model === "string" ? body.model : "" } : null;
+    const record = !isMainWindow && interceptable ? {
       seq: ++seq,
       ts: Date.now(),
       model: body.model || "",
@@ -875,9 +904,20 @@ function createWrappedFetch(original) {
       chatLenAt: getChatLength()
     } : null;
     const response = await original(input, init);
+    if (mainCapture) {
+      collectResponse(response, ({ text, usage }) => {
+        if (typeof globalThis.__tokenMonitorDeliverMainUsage === "function") {
+          void globalThis.__tokenMonitorDeliverMainUsage({ text, usage, model: mainCapture.model });
+        }
+      });
+    }
     if (record) {
       try {
-        collectResponse(response, record);
+        collectResponse(response, ({ text, usage }) => {
+          record.responseText = text;
+          record.usage = usage;
+          ingest(record);
+        });
       } catch (error) {
         console.error("[TokenMonitor] aux capture failed:", error);
       }
@@ -925,6 +965,7 @@ function installAuxFetchInterceptor() {
   globalThis.__tokenMonitorIngest = handleIngest;
   installClassifierEvents();
   scheduleAutoCardRetry();
+  patchWindow(window, true);
   scanIframes();
   if (!observer.instance && typeof MutationObserver === "function" && typeof document !== "undefined") {
     observer.instance = new MutationObserver(() => scanIframes());
@@ -1417,8 +1458,7 @@ function formatCost(value, rate) {
     return "—";
   }
   const symbol = Number(rate) === 1 ? "$" : "¥";
-  const digits = Math.abs(value) > 0 && Math.abs(value) < 0.01 ? 4 : 2;
-  return `${symbol}${value.toFixed(digits)}`;
+  return `${symbol}${value.toFixed(4)}`;
 }
 function escapeHtml2(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -1959,7 +1999,6 @@ function unmountPanel() {
 // src/index.js
 var started = false;
 var subscriptions = [];
-var pendingMainRequest = null;
 function ctx5() {
   return globalThis.SillyTavern?.getContext();
 }
@@ -1977,23 +2016,70 @@ function resolveMessageIndex(data) {
   }
   return chat.length ? chat.length - 1 : null;
 }
+var pendingMainRequest = null;
+var lastMainCapture = null;
 function beginMainRequest(generateData) {
-  pendingMainRequest = {
+  const capture = {
     ts: Date.now(),
-    inputPromise: countRequestTokens(generateData)
+    counted: countRequestTokens(generateData),
+    usage: null,
+    awaitingFetch: true,
+    entry: null,
+    message: null
   };
+  pendingMainRequest = capture;
+  lastMainCapture = capture;
 }
-async function takePendingMainRequest() {
-  const pending = pendingMainRequest;
+function takePendingMainRequest() {
+  const capture = pendingMainRequest;
   pendingMainRequest = null;
-  if (!pending) {
-    return null;
-  }
-  const input = await pending.inputPromise;
-  return { ts: pending.ts, input };
+  return capture;
 }
 function discardPendingMainRequest() {
   pendingMainRequest = null;
+}
+function claimMainFetch() {
+  const capture = pendingMainRequest;
+  if (!capture || !capture.awaitingFetch) {
+    return false;
+  }
+  capture.awaitingFetch = false;
+  return true;
+}
+function deliverMainUsage({ usage, model } = {}) {
+  const capture = lastMainCapture;
+  if (!capture) {
+    return;
+  }
+  const promptTokens = Number(usage?.prompt_tokens);
+  const completionTokens = Number(usage?.completion_tokens);
+  const input = Number.isFinite(promptTokens) ? promptTokens : null;
+  const output = Number.isFinite(completionTokens) ? completionTokens : null;
+  if (input === null && output === null) {
+    return;
+  }
+  capture.usage = {
+    input,
+    output,
+    model: typeof model === "string" ? model : ""
+  };
+  if (capture.entry) {
+    const fields = {};
+    if (input !== null) {
+      fields.input = input;
+    }
+    if (output !== null) {
+      fields.output = output;
+    }
+    patchRequest(capture.entry.id, fields);
+    if (capture.message) {
+      void updateMessageTokens(capture.message, {
+        input: input !== null ? input : void 0,
+        output: output !== null ? output : void 0
+      });
+    }
+    refreshPanel();
+  }
 }
 async function onGenerateAfterData(generateData, dryRun) {
   const type = takeGenerationType();
@@ -2003,23 +2089,35 @@ async function onGenerateAfterData(generateData, dryRun) {
   beginMainRequest(generateData);
 }
 async function finalizeMainRequest({ text, model, message }, index) {
-  const pending = await takePendingMainRequest();
-  if (!pending) {
+  const capture = takePendingMainRequest();
+  if (!capture) {
     return false;
   }
-  const output = await countTextAsync(text ?? "");
-  const capturedModel = model ?? "";
+  const countedInput = await capture.counted;
+  const usage = capture.usage;
+  const input = usage?.input ?? countedInput ?? null;
+  let output = usage?.output ?? null;
   if (message) {
-    await updateMessageTokens(message, { input: pending.input, output });
+    const data = await updateMessageTokens(message, {
+      input,
+      output: usage?.output
+    });
+    if (output === null) {
+      output = data?.output ?? null;
+    }
+  } else if (output === null) {
+    output = await countTextAsync(text ?? "");
   }
-  appendRequest({
+  const entry = appendRequest({
     kind: "main",
     floor: Number.isInteger(index) ? index : null,
-    model: capturedModel,
-    input: pending.input,
+    model: model || usage?.model || "",
+    input,
     output,
-    ts: pending.ts
+    ts: capture.ts
   });
+  capture.entry = entry ?? null;
+  capture.message = message ?? null;
   return true;
 }
 async function onMessageSent(data) {
@@ -2111,6 +2209,8 @@ function start() {
   }
   started = true;
   initTokenTracking();
+  globalThis.__tokenMonitorClaimMainFetch = claimMainFetch;
+  globalThis.__tokenMonitorDeliverMainUsage = deliverMainUsage;
   installAuxFetchInterceptor();
   void loadCached();
   registerEvents();
@@ -2123,6 +2223,12 @@ function stop() {
   unregisterEvents();
   uninstallAuxFetchInterceptor();
   unmountPanel();
+  if (globalThis.__tokenMonitorClaimMainFetch === claimMainFetch) {
+    delete globalThis.__tokenMonitorClaimMainFetch;
+  }
+  if (globalThis.__tokenMonitorDeliverMainUsage === deliverMainUsage) {
+    delete globalThis.__tokenMonitorDeliverMainUsage;
+  }
 }
 function onEnable() {
   start();

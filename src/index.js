@@ -13,16 +13,13 @@
  */
 
 import { initTokenTracking, takeGenerationType, isQuietType, countRequestTokens, countTextAsync } from './tokens.js';
-import { updateMessageTokens, updateChatSummary, clearAllTokenData, appendRequest } from './store.js';
+import { updateMessageTokens, updateChatSummary, clearAllTokenData, appendRequest, patchRequest } from './store.js';
 import { installAuxFetchInterceptor, uninstallAuxFetchInterceptor, rescanAuxFrames } from './interceptor.js';
 import { loadCached as loadPriceCatalogue } from './pricing.js';
 import { mountPanel, unmountPanel, refreshPanel } from './panel.js';
 
 let started = false;
 let subscriptions = [];
-
-/** In-flight main generation: { ts, inputPromise } until a message event binds it. */
-let pendingMainRequest = null;
 
 function ctx() {
     return globalThis.SillyTavern?.getContext();
@@ -48,28 +45,89 @@ function resolveMessageIndex(data) {
  * Main generation request lifecycle
  *
  * generate_interceptor (type) -> GENERATE_AFTER_DATA (prompt payload)
+ *   -> fetch interceptor (API usage from the response, preferred)
  *   -> MESSAGE_RECEIVED / IMPERSONATE_READY (bind to floor, append request record)
+ *
+ * Local token counting is only a fallback: providers bill by their own usage
+ * numbers, which the response carries whenever the API reports them.
  * ------------------------------------------------------------------ */
 
+/** In-flight generation, not yet bound to a message. */
+let pendingMainRequest = null;
+/** Last capture, still patchable by a late-arriving usage payload. */
+let lastMainCapture = null;
+
 function beginMainRequest(generateData) {
-    pendingMainRequest = {
+    const capture = {
         ts: Date.now(),
-        inputPromise: countRequestTokens(generateData),
+        counted: countRequestTokens(generateData),
+        usage: null,
+        awaitingFetch: true,
+        entry: null,
+        message: null,
     };
+    pendingMainRequest = capture;
+    lastMainCapture = capture;
 }
 
-async function takePendingMainRequest() {
-    const pending = pendingMainRequest;
+function takePendingMainRequest() {
+    const capture = pendingMainRequest;
     pendingMainRequest = null;
-    if (!pending) {
-        return null;
-    }
-    const input = await pending.inputPromise;
-    return { ts: pending.ts, input };
+    return capture;
 }
 
 function discardPendingMainRequest() {
     pendingMainRequest = null;
+}
+
+/** Called by the fetch interceptor: one capture binds at most one request. */
+function claimMainFetch() {
+    const capture = pendingMainRequest;
+    if (!capture || !capture.awaitingFetch) {
+        return false;
+    }
+    capture.awaitingFetch = false;
+    return true;
+}
+
+/** Called by the fetch interceptor with the response's `usage` (if any). */
+function deliverMainUsage({ usage, model } = {}) {
+    const capture = lastMainCapture;
+    if (!capture) {
+        return;
+    }
+
+    const promptTokens = Number(usage?.prompt_tokens);
+    const completionTokens = Number(usage?.completion_tokens);
+    const input = Number.isFinite(promptTokens) ? promptTokens : null;
+    const output = Number.isFinite(completionTokens) ? completionTokens : null;
+    if (input === null && output === null) {
+        return;
+    }
+
+    capture.usage = {
+        input,
+        output,
+        model: typeof model === 'string' ? model : '',
+    };
+
+    if (capture.entry) {
+        const fields = {};
+        if (input !== null) {
+            fields.input = input;
+        }
+        if (output !== null) {
+            fields.output = output;
+        }
+        patchRequest(capture.entry.id, fields);
+        if (capture.message) {
+            void updateMessageTokens(capture.message, {
+                input: input !== null ? input : undefined,
+                output: output !== null ? output : undefined,
+            });
+        }
+        refreshPanel();
+    }
 }
 
 async function onGenerateAfterData(generateData, dryRun) {
@@ -82,29 +140,42 @@ async function onGenerateAfterData(generateData, dryRun) {
 
 /**
  * Bind the in-flight generation to its result: one request record (so
- * re-generations of the same floor appear as separate rows) plus, when a
- * message is involved, the per-message snapshot.
+ * re-generations of one floor appear as separate rows) plus, when a message is
+ * involved, the per-message snapshot. API usage wins over local counting.
  */
 async function finalizeMainRequest({ text, model, message }, index) {
-    const pending = await takePendingMainRequest();
-    if (!pending) {
+    const capture = takePendingMainRequest();
+    if (!capture) {
         return false;
     }
 
-    const output = await countTextAsync(text ?? '');
-    const capturedModel = model ?? '';
+    const countedInput = await capture.counted;
+    const usage = capture.usage;
+    const input = usage?.input ?? countedInput ?? null;
 
+    let output = usage?.output ?? null;
     if (message) {
-        await updateMessageTokens(message, { input: pending.input, output });
+        const data = await updateMessageTokens(message, {
+            input,
+            output: usage?.output,
+        });
+        if (output === null) {
+            output = data?.output ?? null;
+        }
+    } else if (output === null) {
+        output = await countTextAsync(text ?? '');
     }
-    appendRequest({
+
+    const entry = appendRequest({
         kind: 'main',
         floor: Number.isInteger(index) ? index : null,
-        model: capturedModel,
-        input: pending.input,
+        model: model || usage?.model || '',
+        input,
         output,
-        ts: pending.ts,
+        ts: capture.ts,
     });
+    capture.entry = entry ?? null;
+    capture.message = message ?? null;
     return true;
 }
 
@@ -219,6 +290,8 @@ export function start() {
     started = true;
 
     initTokenTracking();
+    globalThis.__tokenMonitorClaimMainFetch = claimMainFetch;
+    globalThis.__tokenMonitorDeliverMainUsage = deliverMainUsage;
     installAuxFetchInterceptor();
     void loadPriceCatalogue();
     registerEvents();
@@ -233,6 +306,12 @@ export function stop() {
     unregisterEvents();
     uninstallAuxFetchInterceptor();
     unmountPanel();
+    if (globalThis.__tokenMonitorClaimMainFetch === claimMainFetch) {
+        delete globalThis.__tokenMonitorClaimMainFetch;
+    }
+    if (globalThis.__tokenMonitorDeliverMainUsage === deliverMainUsage) {
+        delete globalThis.__tokenMonitorDeliverMainUsage;
+    }
 }
 
 /* ------------------------------------------------------------------ *

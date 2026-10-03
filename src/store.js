@@ -54,6 +54,19 @@ function isTrackable(message) {
         && typeof message.mes === 'string';
 }
 
+/**
+ * Text a generation produced for this message. Reasoning (thinking) is part of
+ * the billed completion, so it counts towards the output too.
+ */
+function ownTextOf(message) {
+    const mes = typeof message?.mes === 'string' ? message.mes : '';
+    if (message?.is_user === true) {
+        return mes;
+    }
+    const reasoning = message?.extra?.reasoning;
+    return `${typeof reasoning === 'string' ? reasoning : ''}${mes}`;
+}
+
 /* ------------------------------------------------------------------ *
  * Data model
  * ------------------------------------------------------------------ */
@@ -262,7 +275,7 @@ export async function updateMessageTokens(message, { input, output } = {}) {
     }
 
     const existing = getMessageTokens(message) ?? {};
-    const own = await countTextAsync(message.mes);
+    const own = await countTextAsync(ownTextOf(message));
     const isUser = message.is_user === true;
 
     const resolvedInput = input !== undefined ? input : (isUser ? own : (existing.input ?? null));
@@ -289,7 +302,7 @@ export async function recomputeChat() {
         }
 
         const existing = getMessageTokens(message) ?? {};
-        const own = await countTextAsync(message.mes);
+        const own = await countTextAsync(ownTextOf(message));
         const isUser = message.is_user === true;
         const input = isUser ? own : (existing.input ?? null);
         const output = isUser ? 0 : own;
@@ -308,7 +321,7 @@ export async function recomputeChat() {
         if (!isTrackable(message)) {
             continue;
         }
-        const own = await countTextAsync(message.mes);
+        const own = await countTextAsync(ownTextOf(message));
         if (own !== null) {
             entry.output = own;
         }

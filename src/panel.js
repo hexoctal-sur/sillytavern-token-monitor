@@ -132,8 +132,7 @@ function formatCost(value, rate) {
         return '—';
     }
     const symbol = Number(rate) === 1 ? '$' : '¥';
-    const digits = Math.abs(value) > 0 && Math.abs(value) < 0.01 ? 4 : 2;
-    return `${symbol}${value.toFixed(digits)}`;
+    return `${symbol}${value.toFixed(4)}`;
 }
 
 function escapeHtml(value) {

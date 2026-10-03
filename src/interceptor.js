@@ -1,11 +1,15 @@
 /**
- * Auxiliary AI call capture and classification.
+ * AI call capture and classification.
  *
  * The 酒馆助手 (TavernHelper) script runs inside a same-origin iframe and issues
  * its AI calls directly with `fetch('/api/backends/chat-completions/generate')`.
  * We wrap the iframe's `fetch` to observe those calls. The wrapper only
  * *captures* the raw request/response material; classification, token counting
  * and floor attribution all happen on the main window side.
+ *
+ * The main window's own fetch is wrapped too, but only to observe the in-flight
+ * main generation: its response `usage` (when the provider reports one) is the
+ * billed ground truth and takes precedence over locally counted tokens.
  *
  * Classification is content-independent and uses, in priority order:
  *   user markers > fill window > plot window > response regression > other.
@@ -233,7 +237,7 @@ function collectSameOriginWindows(rootDocument, result) {
     return result;
 }
 
-function patchWindow(win) {
+function patchWindow(win, isMainWindow = false) {
     if (!win || win.__tokenMonitorAuxHooked) {
         return;
     }
@@ -242,7 +246,7 @@ function patchWindow(win) {
     }
     const original = win.fetch.bind(win);
     patchedWindows.set(win, win.fetch);
-    win.fetch = createWrappedFetch(original);
+    win.fetch = createWrappedFetch(original, isMainWindow);
     win.__tokenMonitorAuxHooked = true;
 }
 
@@ -378,31 +382,29 @@ async function readSse(response) {
     return { text, usage };
 }
 
-function collectResponse(response, record) {
+function collectResponse(response, onDone) {
     const clone = response.clone();
     const contentType = clone.headers?.get?.('content-type') ?? '';
 
     if (contentType.includes('text/event-stream')) {
         void readSse(clone)
-            .then(({ text, usage }) => {
-                record.responseText = text;
-                record.usage = usage;
-                ingest(record);
-            })
-            .catch(() => ingest(record));
+            .then(({ text, usage }) => onDone({ text, usage }))
+            .catch(() => onDone({ text: '', usage: null }));
         return;
     }
 
     void clone.json()
         .then(payload => {
-            record.usage = payload?.usage ?? null;
-            record.responseText = payload?.choices?.[0]?.message?.content ?? '';
-            ingest(record);
+            const content = payload?.choices?.[0]?.message?.content;
+            onDone({
+                text: typeof content === 'string' ? content : (content == null ? '' : JSON.stringify(content)),
+                usage: payload?.usage ?? null,
+            });
         })
-        .catch(() => ingest(record));
+        .catch(() => onDone({ text: '', usage: null }));
 }
 
-function createWrappedFetch(original) {
+function createWrappedFetch(original, isMainWindow) {
     return async function tokenMonitorFetch(input, init) {
         const url = typeof input === 'string' ? input : (input?.url ?? '');
         let body = null;
@@ -420,7 +422,17 @@ function createWrappedFetch(original) {
             && Array.isArray(body.messages)
             && body.messages.length > 0;
 
-        const record = interceptable
+        // Main window: only the in-flight main generation is observed. Its
+        // response usage (prompt_tokens/completion_tokens) is the ground truth
+        // the provider bills for, so it is preferred over local counting.
+        const mainCapture = isMainWindow
+            && interceptable
+            && typeof globalThis.__tokenMonitorClaimMainFetch === 'function'
+            && globalThis.__tokenMonitorClaimMainFetch()
+                ? { model: typeof body.model === 'string' ? body.model : '' }
+                : null;
+
+        const record = !isMainWindow && interceptable
             ? {
                 seq: ++seq,
                 ts: Date.now(),
@@ -436,9 +448,21 @@ function createWrappedFetch(original) {
 
         const response = await original(input, init);
 
+        if (mainCapture) {
+            collectResponse(response, ({ text, usage }) => {
+                if (typeof globalThis.__tokenMonitorDeliverMainUsage === 'function') {
+                    void globalThis.__tokenMonitorDeliverMainUsage({ text, usage, model: mainCapture.model });
+                }
+            });
+        }
+
         if (record) {
             try {
-                collectResponse(response, record);
+                collectResponse(response, ({ text, usage }) => {
+                    record.responseText = text;
+                    record.usage = usage;
+                    ingest(record);
+                });
             } catch (error) {
                 console.error('[TokenMonitor] aux capture failed:', error);
             }
@@ -505,6 +529,7 @@ export function installAuxFetchInterceptor() {
     globalThis.__tokenMonitorIngest = handleIngest;
     installClassifierEvents();
     scheduleAutoCardRetry();
+    patchWindow(window, true);
     scanIframes();
 
     if (!observer.instance && typeof MutationObserver === 'function' && typeof document !== 'undefined') {

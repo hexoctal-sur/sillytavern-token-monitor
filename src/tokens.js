@@ -21,7 +21,6 @@
 
 const QUIET_TYPES = new Set(['quiet']);
 const TOKEN_CACHE_MAX = 400;
-const ESTIMATE_CHARS_PER_TOKEN = 1.5;
 
 const tokenCache = new Map();
 
@@ -95,17 +94,52 @@ export async function countTokensCached(text) {
 }
 
 /**
+ * Count one chat-completion message: content (string or content parts),
+ * tool calls and the optional name — everything that goes over the wire.
+ */
+async function countMessageTokens(message) {
+    if (typeof message === 'string') {
+        return countTokensCached(message);
+    }
+
+    let total = 0;
+    const content = message?.content ?? '';
+
+    if (typeof content === 'string') {
+        total += (await countTokensCached(content)) ?? 0;
+    } else if (Array.isArray(content)) {
+        for (const part of content) {
+            if (typeof part?.text === 'string') {
+                total += (await countTokensCached(part.text)) ?? 0;
+            }
+            // image/video parts are not counted locally; API usage covers them
+        }
+    } else if (content != null) {
+        total += (await countTokensCached(JSON.stringify(content))) ?? 0;
+    }
+
+    if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+        total += (await countTokensCached(JSON.stringify(message.tool_calls))) ?? 0;
+    }
+    if (typeof message?.name === 'string' && message.name) {
+        total += (await countTokensCached(message.name)) ?? 0;
+    }
+
+    return total;
+}
+
+/**
  * Sum the token counts of a chat-completion message array.
- * Falls back to a character-based estimate when counting is unavailable.
+ * This is a fallback for providers that don't report usage: it cannot see
+ * chat-template overhead or image parts, so API usage is preferred when the
+ * response carries it.
  */
 export async function countMsgTokens(messages) {
     let total = 0;
 
     for (const message of messages ?? []) {
-        const raw = typeof message === 'string' ? message : (message?.content ?? '');
-        const text = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '');
-        const count = await countTokensCached(text);
-        total += count !== null ? count : Math.ceil(text.length / ESTIMATE_CHARS_PER_TOKEN);
+        const count = await countMessageTokens(message);
+        total += count !== null ? count : 0;
     }
 
     return total;
