@@ -1193,7 +1193,7 @@ function renderOptions(list, options, activeIndex) {
 function positionList(input, list) {
   const rect = input.getBoundingClientRect();
   const below = window.innerHeight - rect.bottom;
-  const height = Math.min(MAX_OPTION_HEIGHT, list.scrollHeight);
+  const height = Math.min(MAX_OPTION_HEIGHT, list.scrollHeight || MAX_OPTION_HEIGHT);
   list.style.left = `${rect.left}px`;
   list.style.width = `${rect.width}px`;
   list.style.maxHeight = `${height}px`;
@@ -1205,23 +1205,49 @@ function positionList(input, list) {
     list.style.top = `${rect.bottom + 2}px`;
   }
 }
+function isInputVisible(input) {
+  const rect = input.getBoundingClientRect();
+  if (rect.bottom < 0 || rect.top > window.innerHeight || rect.right < 0 || rect.left > window.innerWidth) {
+    return false;
+  }
+  const clipper = input.closest(".tm-settings-body");
+  if (clipper) {
+    const clip = clipper.getBoundingClientRect();
+    if (rect.bottom < clip.top + 2 || rect.top > clip.bottom - 2) {
+      return false;
+    }
+  }
+  return true;
+}
 function attachModelCombo(input, { onCommit } = {}) {
   const list = createList();
   let matches = [];
   let activeIndex = -1;
-  const onWindowChange = () => close();
+  let isOpen = false;
+  const onWindowChange = () => {
+    if (!isOpen) {
+      return;
+    }
+    if (document.activeElement !== input || !isInputVisible(input)) {
+      close();
+      return;
+    }
+    positionList(input, list);
+  };
   input.setAttribute("autocomplete", "off");
   input.setAttribute("role", "combobox");
   input.setAttribute("aria-expanded", "false");
   input.setAttribute("aria-controls", list.id);
   input.setAttribute("aria-autocomplete", "list");
   function open() {
-    positionList(input, list);
     list.classList.remove("tm-hidden");
+    isOpen = true;
     input.setAttribute("aria-expanded", "true");
+    positionList(input, list);
   }
   function close() {
     list.classList.add("tm-hidden");
+    isOpen = false;
     input.setAttribute("aria-expanded", "false");
     activeIndex = -1;
   }
@@ -1252,6 +1278,7 @@ function attachModelCombo(input, { onCommit } = {}) {
   }
   input.addEventListener("input", refresh);
   input.addEventListener("focus", refresh);
+  input.addEventListener("click", refresh);
   input.addEventListener("keydown", (event) => {
     if (event.key === "ArrowDown") {
       event.preventDefault();
@@ -1306,6 +1333,7 @@ var defaultSettings = Object.freeze({
   classifyMode: "auto",
   panelVisible: false,
   panelPosition: null,
+  panelSize: null,
   collapsed: false
 });
 var AUX_MODEL_SETTINGS = { plot: "plotModel", fill: "fillModel", other: "fillModel" };
@@ -1524,7 +1552,9 @@ function buildPanelSkeleton() {
                     </div>
                 </div>
             </div>
-        </div>`;
+        </div>
+        <div class="tm-resize tm-resize-bl" title="拖拽调整大小"></div>
+        <div class="tm-resize tm-resize-br" title="拖拽调整大小"></div>`;
   return panel;
 }
 function bindPanelEvents(panel) {
@@ -1539,6 +1569,7 @@ function bindPanelEvents(panel) {
     document.getElementById("tm-settings-body").classList.toggle("tm-hidden");
   });
   bindDrag(panel);
+  bindResize(panel);
   bindSettingsInputs();
 }
 function bindDrag(panel) {
@@ -1580,6 +1611,64 @@ function bindDrag(panel) {
     dragging = false;
     const rect = panel.getBoundingClientRect();
     const settings = getSettings();
+    settings.panelPosition = { x: Math.round(rect.left), y: Math.round(rect.top) };
+    saveSettings();
+  });
+}
+var MIN_PANEL_WIDTH = 320;
+var MIN_PANEL_HEIGHT = 220;
+function clampSize(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+function bindResize(panel) {
+  let resizing = null;
+  const startResize = (mode, event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = panel.getBoundingClientRect();
+    panel.style.left = `${rect.left}px`;
+    panel.style.top = `${rect.top}px`;
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+    resizing = {
+      mode,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height
+    };
+    panel.classList.add("tm-resized");
+  };
+  panel.querySelector(".tm-resize-bl")?.addEventListener("mousedown", (event) => startResize("bl", event));
+  panel.querySelector(".tm-resize-br")?.addEventListener("mousedown", (event) => startResize("br", event));
+  window.addEventListener("mousemove", (event) => {
+    if (!resizing) {
+      return;
+    }
+    const dx = event.clientX - resizing.startX;
+    const dy = event.clientY - resizing.startY;
+    const maxWidth = window.innerWidth - 20;
+    const maxHeight = window.innerHeight * 0.95;
+    const width = clampSize(
+      resizing.mode === "br" ? resizing.width + dx : resizing.width - dx,
+      MIN_PANEL_WIDTH,
+      maxWidth
+    );
+    const height = clampSize(resizing.height + dy, MIN_PANEL_HEIGHT, maxHeight);
+    panel.style.width = `${Math.round(width)}px`;
+    panel.style.height = `${Math.round(height)}px`;
+    panel.style.left = `${Math.round(resizing.mode === "bl" ? resizing.left + (resizing.width - width) : resizing.left)}px`;
+  });
+  window.addEventListener("mouseup", () => {
+    if (!resizing) {
+      return;
+    }
+    resizing = null;
+    const rect = panel.getBoundingClientRect();
+    const settings = getSettings();
+    settings.panelSize = { w: Math.round(rect.width), h: Math.round(rect.height) };
     settings.panelPosition = { x: Math.round(rect.left), y: Math.round(rect.top) };
     saveSettings();
   });
@@ -1799,6 +1888,7 @@ function setPanelVisible(visible, { persist = true } = {}) {
     panel = buildPanelSkeleton();
     document.body.appendChild(panel);
     applySavedPosition(panel);
+    applySavedSize(panel);
     if (getSettings().collapsed) {
       panel.classList.add("tm-collapsed");
     }
@@ -1828,6 +1918,14 @@ function applySavedPosition(panel) {
     panel.style.bottom = "auto";
   }
 }
+function applySavedSize(panel) {
+  const size = getSettings().panelSize;
+  if (size && Number.isFinite(size.w) && Number.isFinite(size.h)) {
+    panel.style.width = `${clampSize(size.w, MIN_PANEL_WIDTH, window.innerWidth - 20)}px`;
+    panel.style.height = `${clampSize(size.h, MIN_PANEL_HEIGHT, window.innerHeight * 0.95)}px`;
+    panel.classList.add("tm-resized");
+  }
+}
 function mountPanel() {
   if (bound) {
     return;
@@ -1841,6 +1939,7 @@ function mountPanel() {
   const panel = buildPanelSkeleton();
   document.body.appendChild(panel);
   applySavedPosition(panel);
+  applySavedSize(panel);
   if (getSettings().collapsed) {
     panel.classList.add("tm-collapsed");
   }

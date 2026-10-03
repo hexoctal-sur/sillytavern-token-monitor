@@ -46,6 +46,11 @@
     user-select: none;
 }
 
+/* once the user has resized it, the panel follows the explicit size */
+#token_monitor_panel.tm-resized {
+    max-height: none;
+}
+
 #token_monitor_panel.tm-hidden {
     display: none;
 }
@@ -90,6 +95,7 @@
     gap: 8px;
     overflow: hidden;
     min-height: 0;
+    flex: 1 1 auto;
 }
 
 #token_monitor_panel .tm-main {
@@ -145,6 +151,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    flex: 1 1 auto;
     border-top: 1px solid rgba(255, 255, 255, 0.1);
     padding-top: 4px;
 }
@@ -168,6 +175,11 @@
     overflow-y: auto;
     min-height: 40px;
     max-height: 26vh;
+    flex: 1 1 auto;
+}
+
+#token_monitor_panel.tm-resized .tm-requests {
+    max-height: none;
 }
 
 #token_monitor_panel .tm-request-row {
@@ -297,9 +309,63 @@
 }
 
 #token_monitor_panel .tm-actions {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     gap: 6px;
+}
+
+/* ST's .menu_button is width:min-content with vertical margins; normalize it
+   into equal-width buttons inside the settings grid */
+#token_monitor_panel .tm-actions .menu_button {
+    width: 100%;
+    margin: 0;
+    padding: 6px 8px;
+    box-sizing: border-box;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#token_monitor_panel .tm-resize {
+    position: absolute;
+    bottom: 0;
+    width: 16px;
+    height: 16px;
+    z-index: 5;
+    opacity: 0.45;
+    transition: opacity 0.15s;
+}
+
+#token_monitor_panel .tm-resize:hover {
+    opacity: 1;
+}
+
+#token_monitor_panel .tm-resize-br {
+    right: 0;
+    cursor: nwse-resize;
+    background:
+        linear-gradient(135deg,
+            transparent 0 55%,
+            currentColor 55% 62%,
+            transparent 62% 72%,
+            currentColor 72% 79%,
+            transparent 79%);
+}
+
+#token_monitor_panel .tm-resize-bl {
+    left: 0;
+    cursor: nesw-resize;
+    background:
+        linear-gradient(45deg,
+            transparent 0 55%,
+            currentColor 55% 62%,
+            transparent 62% 72%,
+            currentColor 72% 79%,
+            transparent 79%);
+}
+
+#token_monitor_panel.tm-collapsed .tm-resize {
+    display: none;
 }
 
 #token_monitor_panel .tm-aux-row i {

@@ -28,6 +28,7 @@ const defaultSettings = Object.freeze({
     classifyMode: 'auto',
     panelVisible: false,
     panelPosition: null,
+    panelSize: null,
     collapsed: false,
 });
 
@@ -301,7 +302,9 @@ function buildPanelSkeleton() {
                     </div>
                 </div>
             </div>
-        </div>`;
+        </div>
+        <div class="tm-resize tm-resize-bl" title="拖拽调整大小"></div>
+        <div class="tm-resize tm-resize-br" title="拖拽调整大小"></div>`;
     return panel;
 }
 
@@ -320,6 +323,7 @@ function bindPanelEvents(panel) {
     });
 
     bindDrag(panel);
+    bindResize(panel);
     bindSettingsInputs();
 }
 
@@ -365,6 +369,76 @@ function bindDrag(panel) {
         dragging = false;
         const rect = panel.getBoundingClientRect();
         const settings = getSettings();
+        settings.panelPosition = { x: Math.round(rect.left), y: Math.round(rect.top) };
+        saveSettings();
+    });
+}
+
+const MIN_PANEL_WIDTH = 320;
+const MIN_PANEL_HEIGHT = 220;
+
+function clampSize(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}
+
+/** Resize via the bottom-left / bottom-right corner handles. */
+function bindResize(panel) {
+    let resizing = null;
+
+    const startResize = (mode, event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const rect = panel.getBoundingClientRect();
+        // switch to left/top anchoring so the resize math is stable
+        panel.style.left = `${rect.left}px`;
+        panel.style.top = `${rect.top}px`;
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+        resizing = {
+            mode,
+            startX: event.clientX,
+            startY: event.clientY,
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+        };
+        panel.classList.add('tm-resized');
+    };
+
+    panel.querySelector('.tm-resize-bl')?.addEventListener('mousedown', event => startResize('bl', event));
+    panel.querySelector('.tm-resize-br')?.addEventListener('mousedown', event => startResize('br', event));
+
+    window.addEventListener('mousemove', event => {
+        if (!resizing) {
+            return;
+        }
+        const dx = event.clientX - resizing.startX;
+        const dy = event.clientY - resizing.startY;
+        const maxWidth = window.innerWidth - 20;
+        const maxHeight = window.innerHeight * 0.95;
+
+        const width = clampSize(
+            resizing.mode === 'br' ? resizing.width + dx : resizing.width - dx,
+            MIN_PANEL_WIDTH,
+            maxWidth,
+        );
+        const height = clampSize(resizing.height + dy, MIN_PANEL_HEIGHT, maxHeight);
+
+        panel.style.width = `${Math.round(width)}px`;
+        panel.style.height = `${Math.round(height)}px`;
+        // bottom-left resize keeps the right edge fixed
+        panel.style.left = `${Math.round(resizing.mode === 'bl' ? resizing.left + (resizing.width - width) : resizing.left)}px`;
+    });
+
+    window.addEventListener('mouseup', () => {
+        if (!resizing) {
+            return;
+        }
+        resizing = null;
+        const rect = panel.getBoundingClientRect();
+        const settings = getSettings();
+        settings.panelSize = { w: Math.round(rect.width), h: Math.round(rect.height) };
         settings.panelPosition = { x: Math.round(rect.left), y: Math.round(rect.top) };
         saveSettings();
     });
@@ -634,6 +708,7 @@ export function setPanelVisible(visible, { persist = true } = {}) {
         panel = buildPanelSkeleton();
         document.body.appendChild(panel);
         applySavedPosition(panel);
+        applySavedSize(panel);
         if (getSettings().collapsed) {
             panel.classList.add('tm-collapsed');
         }
@@ -668,6 +743,15 @@ function applySavedPosition(panel) {
     }
 }
 
+function applySavedSize(panel) {
+    const size = getSettings().panelSize;
+    if (size && Number.isFinite(size.w) && Number.isFinite(size.h)) {
+        panel.style.width = `${clampSize(size.w, MIN_PANEL_WIDTH, window.innerWidth - 20)}px`;
+        panel.style.height = `${clampSize(size.h, MIN_PANEL_HEIGHT, window.innerHeight * 0.95)}px`;
+        panel.classList.add('tm-resized');
+    }
+}
+
 /* ------------------------------------------------------------------ *
  * Lifecycle
  * ------------------------------------------------------------------ */
@@ -687,6 +771,7 @@ export function mountPanel() {
     const panel = buildPanelSkeleton();
     document.body.appendChild(panel);
     applySavedPosition(panel);
+    applySavedSize(panel);
     if (getSettings().collapsed) {
         panel.classList.add('tm-collapsed');
     }

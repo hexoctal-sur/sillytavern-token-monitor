@@ -47,7 +47,8 @@ function renderOptions(list, options, activeIndex) {
 function positionList(input, list) {
     const rect = input.getBoundingClientRect();
     const below = window.innerHeight - rect.bottom;
-    const height = Math.min(MAX_OPTION_HEIGHT, list.scrollHeight);
+    // the list must be visible while measuring, otherwise scrollHeight is 0
+    const height = Math.min(MAX_OPTION_HEIGHT, list.scrollHeight || MAX_OPTION_HEIGHT);
 
     list.style.left = `${rect.left}px`;
     list.style.width = `${rect.width}px`;
@@ -62,6 +63,22 @@ function positionList(input, list) {
     }
 }
 
+/** Whether the input is still on screen and inside its scroll container. */
+function isInputVisible(input) {
+    const rect = input.getBoundingClientRect();
+    if (rect.bottom < 0 || rect.top > window.innerHeight || rect.right < 0 || rect.left > window.innerWidth) {
+        return false;
+    }
+    const clipper = input.closest('.tm-settings-body');
+    if (clipper) {
+        const clip = clipper.getBoundingClientRect();
+        if (rect.bottom < clip.top + 2 || rect.top > clip.bottom - 2) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /**
  * Attach a typeahead dropdown to an existing <input>.
  * The list lives on document.body so panel overflow cannot clip it.
@@ -73,8 +90,20 @@ export function attachModelCombo(input, { onCommit } = {}) {
     const list = createList();
     let matches = [];
     let activeIndex = -1;
+    let isOpen = false;
 
-    const onWindowChange = () => close();
+    const onWindowChange = () => {
+        if (!isOpen) {
+            return;
+        }
+        // Scrolling must not kill the dropdown: just re-anchor it to the input.
+        // Only hide it when the input itself has left the viewport.
+        if (document.activeElement !== input || !isInputVisible(input)) {
+            close();
+            return;
+        }
+        positionList(input, list);
+    };
 
     input.setAttribute('autocomplete', 'off');
     input.setAttribute('role', 'combobox');
@@ -83,13 +112,15 @@ export function attachModelCombo(input, { onCommit } = {}) {
     input.setAttribute('aria-autocomplete', 'list');
 
     function open() {
-        positionList(input, list);
         list.classList.remove('tm-hidden');
+        isOpen = true;
         input.setAttribute('aria-expanded', 'true');
+        positionList(input, list);
     }
 
     function close() {
         list.classList.add('tm-hidden');
+        isOpen = false;
         input.setAttribute('aria-expanded', 'false');
         activeIndex = -1;
     }
@@ -125,6 +156,8 @@ export function attachModelCombo(input, { onCommit } = {}) {
 
     input.addEventListener('input', refresh);
     input.addEventListener('focus', refresh);
+    // re-clicking an already focused input must reopen the list too
+    input.addEventListener('click', refresh);
 
     input.addEventListener('keydown', event => {
         if (event.key === 'ArrowDown') {
