@@ -613,7 +613,7 @@ function renderRequests() {
             ? `模型 ${entry.model || '(空)'} 不在价格库，按 ${priced.fallbackModel} 计价`
             : (entry.model || '');
 
-        const floorText = floorKnown ? `${entry.floor + 1}楼` : '未归层';
+        const floorText = floorKnown ? `${entry.floor}楼` : '未归层';
         const modelText = entry.model || '—';
 
         return `

@@ -337,13 +337,13 @@ function textMatches(a, b) {
     return false;
 }
 
-function findPlotMessage(responseText) {
+function findPlotMessage(responseText, minIndex = 0) {
     if (!responseText) {
         return null;
     }
     const chat = ctx()?.chat ?? [];
 
-    for (let i = chat.length - 1; i >= 0; i--) {
+    for (let i = chat.length - 1; i >= minIndex; i--) {
         const message = chat[i];
         if (!message || message.is_system === true) {
             continue;
@@ -368,15 +368,20 @@ export function hasPlotMatch(responseText) {
     return Boolean(findPlotMessage(responseText));
 }
 
-function findNearestUserMessage(chatLenAt) {
+/**
+ * The user message that triggered the call — the floor being created, not some
+ * older existing floor. Requests are often issued just before SillyTavern
+ * pushes the message into the chat, so the search must NOT be bounded by the
+ * chat length captured at request time (`chatLenAt`), otherwise the just-sent
+ * message is skipped and an older user message gets the usage instead.
+ */
+function findTriggerUserMessage() {
     const chat = ctx()?.chat ?? [];
-    const limit = Number.isInteger(chatLenAt) && chatLenAt > 0 && chatLenAt <= chat.length
-        ? chatLenAt
-        : chat.length;
 
-    for (let i = limit - 1; i >= 0; i--) {
-        if (chat[i]?.is_user === true) {
-            return chat[i];
+    for (let i = chat.length - 1; i >= 0; i--) {
+        const message = chat[i];
+        if (message && message.is_system !== true && message.is_user === true) {
+            return message;
         }
     }
     return null;
@@ -454,17 +459,24 @@ function addUnattributed(category, record) {
 }
 
 async function recordPlotUsage(record) {
-    let target = findPlotMessage(record.responseText);
+    // Only floors at/after the trigger may own the plot result; a match on an
+    // older floor is a stale `qrf_plot` and must not steal the usage.
+    const findMatch = () => {
+        const minIndex = indexOfMessage(findTriggerUserMessage()) ?? 0;
+        return findPlotMessage(record.responseText, minIndex);
+    };
+
+    let target = findMatch();
 
     if (!target && record.responseText) {
         for (let attempt = 0; attempt < PLOT_MATCH_RETRIES && !target; attempt++) {
             await delay(PLOT_MATCH_INTERVAL_MS);
-            target = findPlotMessage(record.responseText);
+            target = findMatch();
         }
     }
 
     if (!target) {
-        target = findNearestUserMessage(record.chatLenAt);
+        target = findTriggerUserMessage();
     }
 
     if (!target) {

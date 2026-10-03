@@ -321,12 +321,12 @@ function textMatches(a, b) {
   }
   return false;
 }
-function findPlotMessage(responseText) {
+function findPlotMessage(responseText, minIndex = 0) {
   if (!responseText) {
     return null;
   }
   const chat = ctx2()?.chat ?? [];
-  for (let i = chat.length - 1; i >= 0; i--) {
+  for (let i = chat.length - 1; i >= minIndex; i--) {
     const message = chat[i];
     if (!message || message.is_system === true) {
       continue;
@@ -348,12 +348,12 @@ function findPlotMessage(responseText) {
 function hasPlotMatch(responseText) {
   return Boolean(findPlotMessage(responseText));
 }
-function findNearestUserMessage(chatLenAt) {
+function findTriggerUserMessage() {
   const chat = ctx2()?.chat ?? [];
-  const limit = Number.isInteger(chatLenAt) && chatLenAt > 0 && chatLenAt <= chat.length ? chatLenAt : chat.length;
-  for (let i = limit - 1; i >= 0; i--) {
-    if (chat[i]?.is_user === true) {
-      return chat[i];
+  for (let i = chat.length - 1; i >= 0; i--) {
+    const message = chat[i];
+    if (message && message.is_system !== true && message.is_user === true) {
+      return message;
     }
   }
   return null;
@@ -420,15 +420,19 @@ function addUnattributed(category, record) {
   }
 }
 async function recordPlotUsage(record) {
-  let target = findPlotMessage(record.responseText);
+  const findMatch = () => {
+    const minIndex = indexOfMessage(findTriggerUserMessage()) ?? 0;
+    return findPlotMessage(record.responseText, minIndex);
+  };
+  let target = findMatch();
   if (!target && record.responseText) {
     for (let attempt = 0; attempt < PLOT_MATCH_RETRIES && !target; attempt++) {
       await delay(PLOT_MATCH_INTERVAL_MS);
-      target = findPlotMessage(record.responseText);
+      target = findMatch();
     }
   }
   if (!target) {
-    target = findNearestUserMessage(record.chatLenAt);
+    target = findTriggerUserMessage();
   }
   if (!target) {
     addUnattributed("plot", record);
@@ -1808,7 +1812,7 @@ function renderRequests() {
     const priced = recordCost(entry, rate, settings);
     const costText = priced.found ? `${formatCost(priced.cost, rate)}${priced.pricedAtFallback ? "*" : ""}` : "—";
     const costTitle = priced.pricedAtFallback ? `模型 ${entry.model || "(空)"} 不在价格库，按 ${priced.fallbackModel} 计价` : entry.model || "";
-    const floorText = floorKnown ? `${entry.floor + 1}楼` : "未归层";
+    const floorText = floorKnown ? `${entry.floor}楼` : "未归层";
     const modelText = entry.model || "—";
     return `
             <div class="tm-request" data-floor="${floorKnown ? entry.floor : ""}">
