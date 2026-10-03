@@ -19,6 +19,8 @@ const MARKER_STORAGE_KEY = 'token_monitor_markers';
 const AUX_LABELS = { plot: '剧情推进', fill: '填表', other: '其他' };
 const KIND_SHORT = { main: '主', plot: '剧情', fill: '填表', other: '其他' };
 
+const CLEAR_PHRASE = '清空';
+
 const defaultSettings = Object.freeze({
     mainGenModel: '',
     plotModel: '',
@@ -507,10 +509,70 @@ function bindSettingsInputs() {
         await recomputeChat();
         refreshPanel();
     });
-    document.getElementById('tm-clear').addEventListener('click', () => {
-        clearChatTokenData();
-        refreshPanel();
-    });
+    document.getElementById('tm-clear').addEventListener('click', handleClearChat);
+}
+
+/**
+ * Wipe the chat's token data — only after the user typed the confirmation
+ * phrase. Destructive and irreversible, hence the explicit confirmation.
+ */
+async function handleClearChat() {
+    const confirmed = await confirmChatClear();
+    if (!confirmed) {
+        return;
+    }
+    clearChatTokenData();
+    refreshPanel();
+}
+
+/**
+ * Ask for a typed confirmation before clearing.
+ * Prefers SillyTavern's dialog system, falls back to the browser prompt.
+ * @returns {Promise<boolean>} true only when the exact phrase was typed
+ */
+async function confirmChatClear() {
+    const warning = '即将清空当前聊天的<b>全部</b> token 消耗数据（请求流水、楼层统计与汇总），<b>操作无法复原</b>。';
+    const context = ctx();
+    const Popup = context?.Popup;
+    const POPUP_TYPE = context?.POPUP_TYPE;
+    const POPUP_RESULT = context?.POPUP_RESULT;
+
+    if (typeof Popup === 'function' && POPUP_TYPE && POPUP_RESULT) {
+        try {
+            const popup = new Popup(
+                `${warning}<br><br>请输入「<b>${CLEAR_PHRASE}</b>」以确认：`,
+                POPUP_TYPE.INPUT,
+                '',
+                {
+                    okButton: '确认清空',
+                    cancelButton: '取消',
+                    placeholder: `输入「${CLEAR_PHRASE}」以确认`,
+                    onClosing: (instance) => {
+                        if (instance?.result !== POPUP_RESULT.AFFIRMATIVE) {
+                            return true;
+                        }
+                        if (String(instance?.mainInput?.value ?? '').trim() === CLEAR_PHRASE) {
+                            return true;
+                        }
+                        if (typeof toastr !== 'undefined') {
+                            toastr.warning(`请准确输入「${CLEAR_PHRASE}」后再确认`);
+                        }
+                        return false;
+                    },
+                },
+            );
+            const value = await popup.show();
+            return typeof value === 'string' && value.trim() === CLEAR_PHRASE;
+        } catch (error) {
+            console.warn('[TokenMonitor] popup failed, falling back to browser dialog:', error);
+        }
+    }
+
+    const typed = window.prompt(
+        `警告：这会清空当前聊天的全部 token 消耗数据，且无法复原。\n请输入「${CLEAR_PHRASE}」以确认：`,
+        '',
+    );
+    return String(typed ?? '').trim() === CLEAR_PHRASE;
 }
 
 function applyClassification() {
