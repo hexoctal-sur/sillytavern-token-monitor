@@ -6,9 +6,17 @@
  *    or message) with the active SillyTavern tokenizer.
  *  - `countMsgTokens`: count an array of chat-completion messages and sum them.
  *
- * The prompt input token count for a main-chat generation is captured from
- * SillyTavern's `generate_interceptor` (declared in manifest.json), which is
- * invoked with the already computed context size for the upcoming generation.
+ * The prompt input token count of a main-chat generation cannot be taken from
+ * `generate_interceptor`: its `contextSize` argument is `getMaxPromptTokens()`,
+ * i.e. the *budget* (context window minus response length), not the size of the
+ * prompt that is actually sent. The real prompt is only known once SillyTavern
+ * has assembled it, which it publishes via the `GENERATE_AFTER_DATA` event
+ * (`generate_data.prompt` is the final messages array for chat completions, or
+ * the raw prompt string for text-completion APIs). `countRequestTokens` counts
+ * exactly that payload.
+ *
+ * `generate_interceptor` is still registered (manifest.json) but only records
+ * the generation *type*, so quiet/internal generations can be excluded.
  */
 
 const QUIET_TYPES = new Set(['quiet']);
@@ -17,7 +25,7 @@ const ESTIMATE_CHARS_PER_TOKEN = 1.5;
 
 const tokenCache = new Map();
 
-let pendingInputTokens = null;
+let pendingGenType = null;
 
 function ctx() {
     return globalThis.SillyTavern?.getContext();
@@ -32,16 +40,20 @@ function hashString(text) {
 }
 
 export function initTokenTracking() {
-    globalThis.tokenMonitorInterceptor = function (_chat, contextSize, _abort, type) {
-        if (QUIET_TYPES.has(type)) {
-            return;
-        }
-
-        const value = Number(contextSize);
-        if (Number.isFinite(value) && value > 0) {
-            pendingInputTokens = value;
-        }
+    globalThis.tokenMonitorInterceptor = function (_chat, _contextSize, _abort, type) {
+        pendingGenType = typeof type === 'string' && type ? type : 'normal';
     };
+}
+
+/** Consume the generation type captured by the generate interceptor. */
+export function takeGenerationType() {
+    const type = pendingGenType;
+    pendingGenType = null;
+    return type;
+}
+
+export function isQuietType(type) {
+    return QUIET_TYPES.has(type);
 }
 
 export async function countTextAsync(text) {
@@ -99,16 +111,24 @@ export async function countMsgTokens(messages) {
     return total;
 }
 
+/**
+ * Count the request payload of a generation (`generate_data` as published by
+ * `GENERATE_AFTER_DATA`): a messages array for chat completions, or a raw
+ * prompt string for text-completion APIs.
+ * @returns {Promise<number|null>} token count, or null when the payload is unusable
+ */
+export async function countRequestTokens(generateData) {
+    const raw = generateData?.prompt ?? generateData?.messages ?? generateData?.input ?? null;
+
+    if (Array.isArray(raw)) {
+        return countMsgTokens(raw);
+    }
+    if (typeof raw === 'string' && raw.length > 0) {
+        return countTokensCached(raw);
+    }
+    return null;
+}
+
 export function clearTokenCache() {
     tokenCache.clear();
-}
-
-export function consumePendingInput() {
-    const value = pendingInputTokens;
-    pendingInputTokens = null;
-    return value;
-}
-
-export function clearPendingInput() {
-    pendingInputTokens = null;
 }

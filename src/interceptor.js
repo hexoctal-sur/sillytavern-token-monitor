@@ -12,7 +12,7 @@
  */
 
 import { countMsgTokens, countTokensCached } from './tokens.js';
-import { recordAuxUsage, hasPlotMatch } from './store.js';
+import { recordAuxUsage, hasPlotMatch, appendRequest } from './store.js';
 
 const GENERATE_PATH = '/api/backends/chat-completions/generate';
 const FILL_WINDOW_TTL_MS = 120000;
@@ -471,8 +471,19 @@ async function handleIngest(record) {
             ? usageOutput
             : await countTokensCached(record.responseText ?? '');
 
+        const category = resolveCategory(record);
+        const entry = appendRequest({
+            kind: category,
+            floor: null,
+            model: record.model,
+            input: input ?? 0,
+            output: output ?? 0,
+            ts: record.ts,
+        });
+
         await recordAuxUsage({
-            category: resolveCategory(record),
+            category,
+            logId: entry?.id,
             model: record.model,
             input: input ?? 0,
             output: output ?? 0,

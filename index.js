@@ -5,7 +5,7 @@ var QUIET_TYPES = /* @__PURE__ */ new Set(["quiet"]);
 var TOKEN_CACHE_MAX = 400;
 var ESTIMATE_CHARS_PER_TOKEN = 1.5;
 var tokenCache = /* @__PURE__ */ new Map();
-var pendingInputTokens = null;
+var pendingGenType = null;
 function ctx() {
   return globalThis.SillyTavern?.getContext();
 }
@@ -17,15 +17,17 @@ function hashString(text) {
   return (hash >>> 0).toString(36);
 }
 function initTokenTracking() {
-  globalThis.tokenMonitorInterceptor = function(_chat, contextSize, _abort, type) {
-    if (QUIET_TYPES.has(type)) {
-      return;
-    }
-    const value = Number(contextSize);
-    if (Number.isFinite(value) && value > 0) {
-      pendingInputTokens = value;
-    }
+  globalThis.tokenMonitorInterceptor = function(_chat, _contextSize, _abort, type) {
+    pendingGenType = typeof type === "string" && type ? type : "normal";
   };
+}
+function takeGenerationType() {
+  const type = pendingGenType;
+  pendingGenType = null;
+  return type;
+}
+function isQuietType(type) {
+  return QUIET_TYPES.has(type);
 }
 async function countTextAsync(text) {
   const context = ctx();
@@ -69,18 +71,21 @@ async function countMsgTokens(messages) {
   }
   return total;
 }
-function consumePendingInput() {
-  const value = pendingInputTokens;
-  pendingInputTokens = null;
-  return value;
-}
-function clearPendingInput() {
-  pendingInputTokens = null;
+async function countRequestTokens(generateData) {
+  const raw = generateData?.prompt ?? generateData?.messages ?? generateData?.input ?? null;
+  if (Array.isArray(raw)) {
+    return countMsgTokens(raw);
+  }
+  if (typeof raw === "string" && raw.length > 0) {
+    return countTokensCached(raw);
+  }
+  return null;
 }
 
 // src/store.js
 var DATA_KEY = "token_monitor";
 var UNATTRIBUTED_KEY = "token_monitor_unattributed";
+var REQUESTS_KEY = "token_monitor_requests";
 var SCHEMA_VERSION = 2;
 var SAVE_DEBOUNCE_MS = 1500;
 var AUX_CATEGORIES = ["plot", "fill", "other"];
@@ -155,31 +160,6 @@ function addToCategory(category, { model, input, output }) {
   entry.output += toNumber(output);
   category.byModel[key] = entry;
 }
-function mergeCategory(target, source) {
-  target.calls += toNumber(source.calls);
-  target.input += toNumber(source.input);
-  target.output += toNumber(source.output);
-  for (const [model, value] of Object.entries(source.byModel ?? {})) {
-    const entry = target.byModel[model] ?? { calls: 0, input: 0, output: 0 };
-    entry.calls += toNumber(value.calls);
-    entry.input += toNumber(value.input);
-    entry.output += toNumber(value.output);
-    target.byModel[model] = entry;
-  }
-}
-function aggregateAuxByModel(aux) {
-  const result = {};
-  for (const category of AUX_CATEGORIES) {
-    for (const [model, value] of Object.entries(aux[category].byModel)) {
-      const entry = result[model] ?? { calls: 0, input: 0, output: 0 };
-      entry.calls += toNumber(value.calls);
-      entry.input += toNumber(value.input);
-      entry.output += toNumber(value.output);
-      result[model] = entry;
-    }
-  }
-  return result;
-}
 function buildData({ input, output, aux, ts }) {
   return {
     v: SCHEMA_VERSION,
@@ -199,16 +179,97 @@ function attach(message, data) {
   }
   message.extra[DATA_KEY] = data;
 }
-async function updateMessageTokens(message, { usePendingInput = false } = {}) {
+function getRequestLog() {
+  const context = ctx2();
+  if (!context?.chatMetadata) {
+    return [];
+  }
+  if (!Array.isArray(context.chatMetadata[REQUESTS_KEY])) {
+    context.chatMetadata[REQUESTS_KEY] = [];
+  }
+  return context.chatMetadata[REQUESTS_KEY];
+}
+function listRequests() {
+  return getRequestLog().map((entry) => ({ ...entry, floor: Number.isInteger(entry.floor) ? entry.floor : null })).sort((a, b) => a.ts - b.ts || a.id - b.id);
+}
+function appendRequest(record) {
+  const context = ctx2();
+  if (!context?.chatMetadata || !record) {
+    return null;
+  }
+  const log = getRequestLog();
+  const lastId = log.length ? toNumber(log[log.length - 1].id) : 0;
+  const entry = {
+    id: lastId + 1,
+    ts: toNumber(record.ts) || Date.now(),
+    kind: record.kind,
+    floor: Number.isInteger(record.floor) ? record.floor : null,
+    model: typeof record.model === "string" ? record.model : "",
+    input: Number.isFinite(Number(record.input)) && record.input !== null ? Number(record.input) : null,
+    output: Number.isFinite(Number(record.output)) && record.output !== null ? Number(record.output) : null
+  };
+  log.push(entry);
+  scheduleSave();
+  return entry;
+}
+function patchRequest(id, fields) {
+  const entry = getRequestLog().find((item) => toNumber(item.id) === toNumber(id));
+  if (!entry || !fields) {
+    return null;
+  }
+  if ("floor" in fields) {
+    entry.floor = Number.isInteger(fields.floor) ? fields.floor : null;
+  }
+  if ("input" in fields) {
+    entry.input = Number.isFinite(Number(fields.input)) ? Number(fields.input) : null;
+  }
+  if ("output" in fields) {
+    entry.output = Number.isFinite(Number(fields.output)) ? Number(fields.output) : null;
+  }
+  if ("model" in fields && typeof fields.model === "string") {
+    entry.model = fields.model;
+  }
+  scheduleSave();
+  return entry;
+}
+function computeRequestSummary() {
+  const main = { calls: 0, input: 0, output: 0, unknownInput: false };
+  const aux = emptyAux();
+  for (const entry of getRequestLog()) {
+    const input = entry.input === null ? 0 : toNumber(entry.input);
+    const output = entry.output === null ? 0 : toNumber(entry.output);
+    if (entry.kind === "main") {
+      main.calls += 1;
+      main.input += input;
+      main.output += output;
+      if (entry.input === null) {
+        main.unknownInput = true;
+      }
+      continue;
+    }
+    const category = aux[entry.kind];
+    if (category) {
+      addToCategory(category, { model: entry.model, input, output });
+    }
+  }
+  return {
+    main,
+    aux,
+    totalInput: main.input,
+    totalOutput: main.output,
+    total: main.input + main.output
+  };
+}
+async function updateMessageTokens(message, { input, output } = {}) {
   if (!isTrackable(message)) {
     return null;
   }
   const existing = getMessageTokens(message) ?? {};
   const own = await countTextAsync(message.mes);
   const isUser = message.is_user === true;
-  const input = isUser ? own : usePendingInput ? consumePendingInput() ?? existing.input ?? null : existing.input ?? null;
-  const output = isUser ? 0 : own;
-  const data = buildData({ input, output, aux: existing.aux, ts: existing.ts });
+  const resolvedInput = input !== void 0 ? input : isUser ? own : existing.input ?? null;
+  const resolvedOutput = output !== void 0 ? output : isUser ? 0 : own;
+  const data = buildData({ input: resolvedInput, output: resolvedOutput, aux: existing.aux, ts: existing.ts });
   attach(message, data);
   scheduleSave();
   return data;
@@ -226,6 +287,22 @@ async function recomputeChat() {
     const input = isUser ? own : existing.input ?? null;
     const output = isUser ? 0 : own;
     attach(message, buildData({ input, output, aux: existing.aux, ts: existing.ts }));
+  }
+  const lastMainByFloor = /* @__PURE__ */ new Map();
+  for (const entry of getRequestLog()) {
+    if (entry.kind === "main" && Number.isInteger(entry.floor)) {
+      lastMainByFloor.set(entry.floor, entry);
+    }
+  }
+  for (const [floor, entry] of lastMainByFloor) {
+    const message = chat[floor];
+    if (!isTrackable(message)) {
+      continue;
+    }
+    const own = await countTextAsync(message.mes);
+    if (own !== null) {
+      entry.output = own;
+    }
   }
   await flushSave();
 }
@@ -310,6 +387,11 @@ function findLatestAiFloor() {
   }
   return null;
 }
+function indexOfMessage(message) {
+  const chat = ctx2()?.chat ?? [];
+  const index = chat.indexOf(message);
+  return index >= 0 ? index : null;
+}
 function addAuxToMessage(message, category, record) {
   if (!isTrackable(message)) {
     addUnattributed(category, record);
@@ -352,6 +434,7 @@ async function recordPlotUsage(record) {
     addUnattributed("plot", record);
     return;
   }
+  patchRequest(record.logId, { floor: indexOfMessage(target) });
   addAuxToMessage(target, "plot", record);
   scheduleSave();
 }
@@ -362,6 +445,7 @@ function recordFillUsage(record) {
     addUnattributed("fill", record);
     return;
   }
+  patchRequest(record.logId, { floor: indexOfMessage(target) });
   addAuxToMessage(target, "fill", record);
   scheduleSave();
 }
@@ -379,69 +463,17 @@ async function recordAuxUsage(record) {
   }
   addUnattributed(record.category, record);
 }
-function computeChatSummary() {
-  const context = ctx2();
-  const chat = context?.chat ?? [];
-  let totalInput = 0;
-  let totalOutput = 0;
-  let ownTotal = 0;
-  let counted = 0;
-  let messageCount = 0;
-  let lastInput = null;
-  const aux = emptyAux();
-  for (const message of chat) {
-    if (!message || message.is_system === true) {
-      continue;
-    }
-    messageCount += 1;
-    const data = getMessageTokens(message);
-    if (!data) {
-      continue;
-    }
-    const input = Number(data.input);
-    const output = Number(data.output);
-    const hasInput = Number.isFinite(input);
-    const hasOutput = Number.isFinite(output);
-    totalInput += hasInput ? input : 0;
-    totalOutput += hasOutput ? output : 0;
-    ownTotal += message.is_user === true ? hasInput ? input : 0 : hasOutput ? output : 0;
-    counted += 1;
-    if (message.is_user !== true && hasInput) {
-      lastInput = input;
-    }
-    if (data.aux) {
-      const normalized = normalizeAux(data.aux);
-      for (const category of AUX_CATEGORIES) {
-        mergeCategory(aux[category], normalized[category]);
-      }
-    }
-  }
-  const unattributed = normalizeAux(context?.chatMetadata?.[UNATTRIBUTED_KEY]);
-  for (const category of AUX_CATEGORIES) {
-    mergeCategory(aux[category], unattributed[category]);
-  }
-  return {
-    totalInput,
-    totalOutput,
-    total: totalInput + totalOutput,
-    ownTotal,
-    counted,
-    messageCount,
-    lastInput,
-    aux,
-    auxByModel: aggregateAuxByModel(aux)
-  };
-}
 function updateChatSummary() {
   const context = ctx2();
   if (!context?.chatMetadata) {
     return;
   }
-  const summary = computeChatSummary();
+  const summary = computeRequestSummary();
   context.chatMetadata[DATA_KEY] = {
     v: SCHEMA_VERSION,
-    totalInput: summary.totalInput,
-    totalOutput: summary.totalOutput,
+    totalInput: summary.main.input,
+    totalOutput: summary.main.output,
+    calls: summary.main.calls,
     aux: summary.aux,
     updatedAt: Date.now()
   };
@@ -480,6 +512,7 @@ function clearChatTokenData() {
   if (context?.chatMetadata) {
     delete context.chatMetadata[DATA_KEY];
     delete context.chatMetadata[UNATTRIBUTED_KEY];
+    delete context.chatMetadata[REQUESTS_KEY];
   }
   void flushSave();
 }
@@ -860,8 +893,18 @@ async function handleIngest(record) {
     const usageOutput = Number(usage?.completion_tokens);
     const input = Number.isFinite(usageInput) ? usageInput : await countMsgTokens(record.requestTexts);
     const output = Number.isFinite(usageOutput) ? usageOutput : await countTokensCached(record.responseText ?? "");
+    const category = resolveCategory(record);
+    const entry = appendRequest({
+      kind: category,
+      floor: null,
+      model: record.model,
+      input: input ?? 0,
+      output: output ?? 0,
+      ts: record.ts
+    });
     await recordAuxUsage({
-      category: resolveCategory(record),
+      category,
+      logId: entry?.id,
       model: record.model,
       input: input ?? 0,
       output: output ?? 0,
@@ -1253,7 +1296,8 @@ var MENU_ID = "token_monitor_menu_entry";
 var FAB_ID = "token_monitor_fab";
 var MARKER_STORAGE_KEY = "token_monitor_markers";
 var AUX_LABELS = { plot: "剧情推进", fill: "填表", other: "其他" };
-var AUX_BADGE = { plot: "P", fill: "F", other: "O" };
+var KIND_SHORT = { main: "主", plot: "剧情", fill: "填表", other: "其他" };
+var KIND_BADGE = { main: "M", plot: "P", fill: "F", other: "O" };
 var defaultSettings = Object.freeze({
   mainGenModel: "",
   plotModel: "",
@@ -1354,32 +1398,39 @@ function setText(id, text) {
     element.textContent = text;
   }
 }
-function categoryCost(category, rate, fallbackModel) {
-  const models = Object.entries(category?.byModel ?? {});
-  if (models.length === 0) {
-    return { cost: null, unknown: (category?.input ?? 0) > 0 || (category?.output ?? 0) > 0 };
+function fallbackModelFor(kind, settings) {
+  if (kind === "main") {
+    return settings.mainGenModel || detectCurrentModel();
   }
+  return settings[AUX_MODEL_SETTINGS[kind]] ?? "";
+}
+function recordCost(entry, rate, settings) {
+  const fallbackModel = fallbackModelFor(entry.kind, settings);
+  let result = computeCost({ input: entry.input ?? 0, output: entry.output ?? 0, model: entry.model, rate });
+  if (!result.found && fallbackModel) {
+    const fallback = computeCost({ input: entry.input ?? 0, output: entry.output ?? 0, model: fallbackModel, rate });
+    if (fallback.found) {
+      return { found: true, cost: fallback.cost, pricedAtFallback: true, fallbackModel };
+    }
+  }
+  return { found: result.found, cost: result.cost, pricedAtFallback: false, fallbackModel };
+}
+function sumRecordsCost(entries, rate, settings) {
   let cost = 0;
   let anyFound = false;
   let unknown = false;
-  let pricedAtFallback = false;
-  for (const [model, value] of models) {
-    const result = computeCost({ input: value.input, output: value.output, model, rate });
+  let fallback = false;
+  for (const entry of entries) {
+    const result = recordCost(entry, rate, settings);
     if (result.found) {
       cost += result.cost;
       anyFound = true;
-      continue;
-    }
-    const fallback = fallbackModel ? computeCost({ input: value.input, output: value.output, model: fallbackModel, rate }) : { found: false };
-    if (fallback.found) {
-      cost += fallback.cost;
-      anyFound = true;
-      pricedAtFallback = true;
-    } else {
+      fallback = fallback || result.pricedAtFallback;
+    } else if ((entry.input ?? 0) > 0 || (entry.output ?? 0) > 0) {
       unknown = true;
     }
   }
-  return { cost: anyFound ? cost : null, unknown, fallback: pricedAtFallback };
+  return { cost: anyFound ? cost : null, unknown, fallback };
 }
 function addMenuEntry() {
   if (document.getElementById(MENU_ID)) {
@@ -1419,7 +1470,7 @@ function buildPanelSkeleton() {
         </div>
         <div class="tm-body">
             <div class="tm-main">
-                <div class="tm-row"><span class="tm-label">主生成</span><span class="tm-value" id="tm-main-cost">—</span></div>
+                <div class="tm-row"><span class="tm-label">主生成 <span class="tm-calls" id="tm-main-calls"></span></span><span class="tm-value" id="tm-main-cost">—</span></div>
                 <div class="tm-sub">
                     <span id="tm-main-in">in —</span>
                     <span id="tm-main-out">out —</span>
@@ -1429,10 +1480,10 @@ function buildPanelSkeleton() {
             </div>
             <div class="tm-aux" id="tm-aux"></div>
             <div class="tm-list">
-                <div class="tm-messages-head">
-                    <span>#</span><span>角色</span><span>in</span><span>out</span><span>aux</span>
+                <div class="tm-requests-head">
+                    <span>#</span><span>时间</span><span>类型</span><span>楼层</span><span>模型</span><span>in</span><span>out</span><span>费用</span>
                 </div>
-                <div class="tm-messages" id="tm-messages"></div>
+                <div class="tm-requests" id="tm-requests"></div>
             </div>
             <div class="tm-settings">
                 <div class="tm-settings-head" id="tm-settings-toggle">
@@ -1637,73 +1688,82 @@ function updatePriceStatus() {
   const time = meta2.updatedAt ? new Date(meta2.updatedAt).toLocaleString() : "未知时间";
   element.textContent = `已加载 ${meta2.count} 条 · ${time}`;
 }
-function buildBadges(aux) {
-  if (!aux) {
+function formatRequestTime(ts) {
+  const date = new Date(Number(ts) || 0);
+  if (Number.isNaN(date.getTime())) {
     return "—";
   }
-  const badges = [];
-  for (const category of Object.keys(AUX_BADGE)) {
-    const data = aux[category];
-    if (!data || !data.calls) {
-      continue;
-    }
-    const title = `${AUX_LABELS[category]}: ${data.calls}次 · in ${formatNumber(data.input)} · out ${formatNumber(data.output)}`;
-    badges.push(`<span class="tm-badge tm-badge-${category}" title="${escapeHtml2(title)}">${AUX_BADGE[category]}${data.calls}</span>`);
-  }
-  return badges.join("") || "—";
+  return date.toLocaleTimeString([], { hour12: false });
 }
-function renderMessages() {
-  const container = document.getElementById("tm-messages");
+function renderRequests() {
+  const container = document.getElementById("tm-requests");
   if (!container) {
     return;
   }
-  const chat = ctx4()?.chat ?? [];
-  const rows = [];
-  chat.forEach((message, index) => {
-    if (!message || message.is_system === true) {
-      return;
-    }
-    const data = getMessageTokens(message);
-    const role = message.is_user === true ? "用户" : message.name || "角色";
-    const input = data && Number.isFinite(Number(data.input)) ? Number(data.input) : null;
-    const output = data && Number.isFinite(Number(data.output)) ? Number(data.output) : null;
-    rows.push(`
-            <div class="tm-message-row" data-index="${index}">
-                <span class="tm-message-index">${index + 1}</span>
-                <span class="tm-message-role" title="${escapeHtml2(role)}">${escapeHtml2(role)}</span>
-                <span class="tm-message-in">${input === null ? "—" : formatNumber(input)}</span>
-                <span class="tm-message-out">${output === null ? "—" : formatNumber(output)}</span>
-                <span class="tm-message-aux">${buildBadges(data?.aux)}</span>
-            </div>`);
-  });
-  if (rows.length === 0) {
-    container.innerHTML = '<div class="tm-empty">本聊天暂无统计数据</div>';
+  const settings = getSettings();
+  const rate = Number(settings.rate) || 1;
+  const entries = listRequests();
+  if (entries.length === 0) {
+    container.innerHTML = '<div class="tm-empty">本聊天暂无请求记录</div>';
     return;
   }
+  const regenCounter = /* @__PURE__ */ new Map();
+  const rows = entries.map((entry, index) => {
+    const kind = entry.kind in KIND_SHORT ? entry.kind : "other";
+    const floorKnown = Number.isInteger(entry.floor);
+    let regen = "";
+    if (kind === "main" && floorKnown) {
+      const seen = (regenCounter.get(entry.floor) ?? 0) + 1;
+      regenCounter.set(entry.floor, seen);
+      if (seen > 1) {
+        regen = ` <span class="tm-regen">↻${seen}</span>`;
+      }
+    }
+    const priced = recordCost(entry, rate, settings);
+    const costText = priced.found ? `${formatCost(priced.cost, rate)}${priced.pricedAtFallback ? "*" : ""}` : "—";
+    const costTitle = priced.pricedAtFallback ? `模型 ${entry.model || "(空)"} 不在价格库，按 ${priced.fallbackModel} 计价` : entry.model || "";
+    const floorText = floorKnown ? `${entry.floor + 1}` : "—";
+    const modelText = entry.model || "—";
+    return `
+            <div class="tm-request-row" data-floor="${floorKnown ? entry.floor : ""}">
+                <span class="tm-request-index">${index + 1}</span>
+                <span class="tm-request-time">${formatRequestTime(entry.ts)}</span>
+                <span class="tm-request-kind"><span class="tm-badge tm-badge-${kind}" title="${AUX_LABELS[kind] ?? "主生成"}">${KIND_BADGE[kind]}${KIND_SHORT[kind]}</span></span>
+                <span class="tm-request-floor">${floorText}${regen}</span>
+                <span class="tm-request-model" title="${escapeHtml2(modelText)}">${escapeHtml2(modelText)}</span>
+                <span class="tm-request-in">${entry.input === null ? "—" : formatNumber(entry.input)}</span>
+                <span class="tm-request-out">${entry.output === null ? "—" : formatNumber(entry.output)}</span>
+                <span class="tm-request-cost" title="${escapeHtml2(costTitle)}">${costText}</span>
+            </div>`;
+  });
   container.innerHTML = rows.join("");
-  container.querySelectorAll(".tm-message-row").forEach((row) => {
+  container.querySelectorAll(".tm-request-row").forEach((row) => {
+    const floor = row.getAttribute("data-floor");
+    if (floor === "") {
+      return;
+    }
     row.addEventListener("click", () => {
-      const index = row.getAttribute("data-index");
-      const target = document.querySelector(`.mes[mesid="${index}"]`);
+      const target = document.querySelector(`.mes[mesid="${floor}"]`);
       target?.scrollIntoView({ behavior: "smooth", block: "center" });
     });
   });
 }
-function renderAux(summary, rate, settings) {
+function renderAux(entries, rate, settings) {
   const container = document.getElementById("tm-aux");
   if (!container) {
     return;
   }
   container.innerHTML = Object.keys(AUX_LABELS).map((category) => {
-    const data = summary.aux[category];
-    const fallbackModel = settings[AUX_MODEL_SETTINGS[category]] ?? "";
-    const { cost, unknown, fallback } = categoryCost(data, rate, fallbackModel);
-    const costText = cost === null ? "—" : `${formatCost(cost, rate)}${unknown ? "*" : ""}`;
-    const modelNote = fallback ? ` <i>按 ${escapeHtml2(fallbackModel)} 计价</i>` : "";
+    const own = entries.filter((entry) => entry.kind === category);
+    const input = own.reduce((sum, entry) => sum + (entry.input ?? 0), 0);
+    const output = own.reduce((sum, entry) => sum + (entry.output ?? 0), 0);
+    const priced = sumRecordsCost(own, rate, settings);
+    const costText = priced.cost === null ? "—" : `${formatCost(priced.cost, rate)}${priced.unknown ? "*" : ""}`;
+    const modelNote = priced.fallback ? ` <i>按 ${escapeHtml2(fallbackModelFor(category, settings))} 计价</i>` : "";
     return `
             <div class="tm-row tm-aux-row">
                 <span class="tm-label">${AUX_LABELS[category]}</span>
-                <span class="tm-aux-metrics">${data.calls}次 · in ${formatNumber(data.input)} · out ${formatNumber(data.output)} · <b>${costText}</b>${modelNote}</span>
+                <span class="tm-aux-metrics">${own.length}次 · in ${formatNumber(input)} · out ${formatNumber(output)} · <b>${costText}</b>${modelNote}</span>
             </div>`;
   }).join("");
 }
@@ -1714,16 +1774,20 @@ function refreshPanel() {
   }
   const settings = getSettings();
   const rate = Number(settings.rate) || 1;
-  const summary = computeChatSummary();
+  const summary = computeRequestSummary();
+  const entries = listRequests();
   const model = settings.mainGenModel || detectCurrentModel();
-  const mainResult = model ? computeCost({ input: summary.totalInput, output: summary.totalOutput, model, rate }) : { found: false, cost: null };
-  setText("tm-main-in", `in ${formatNumber(summary.totalInput)}`);
-  setText("tm-main-out", `out ${formatNumber(summary.totalOutput)}`);
-  setText("tm-main-total", `total ${formatNumber(summary.total)}`);
-  setText("tm-main-cost", mainResult.found ? formatCost(mainResult.cost, rate) : "—");
+  const mainEntries = entries.filter((entry) => entry.kind === "main");
+  const mainPriced = sumRecordsCost(mainEntries, rate, settings);
+  const mainCostText = mainPriced.cost === null ? "—" : `${formatCost(mainPriced.cost, rate)}${mainPriced.unknown ? "*" : ""}`;
+  setText("tm-main-calls", `${summary.main.calls}次`);
+  setText("tm-main-in", `in ${formatNumber(summary.main.input)}${summary.main.unknownInput ? "*" : ""}`);
+  setText("tm-main-out", `out ${formatNumber(summary.main.output)}`);
+  setText("tm-main-total", `total ${formatNumber(summary.main.input + summary.main.output)}`);
+  setText("tm-main-cost", mainCostText);
   setText("tm-main-model", model ? `模型：${model}` : "未设置模型（不计算主生成成本）");
-  renderAux(summary, rate, settings);
-  renderMessages();
+  renderAux(entries, rate, settings);
+  renderRequests();
   updatePriceStatus();
 }
 function setPanelVisible(visible, { persist = true } = {}) {
@@ -1797,6 +1861,7 @@ function unmountPanel() {
 // src/index.js
 var started = false;
 var subscriptions = [];
+var pendingMainRequest = null;
 function ctx5() {
   return globalThis.SillyTavern?.getContext();
 }
@@ -1807,9 +1872,61 @@ function resolveMessage(data) {
   }
   return chat.length ? chat[chat.length - 1] : null;
 }
+function resolveMessageIndex(data) {
+  const chat = ctx5()?.chat ?? [];
+  if (Number.isInteger(data) && data >= 0 && data < chat.length) {
+    return data;
+  }
+  return chat.length ? chat.length - 1 : null;
+}
+function beginMainRequest(generateData) {
+  pendingMainRequest = {
+    ts: Date.now(),
+    inputPromise: countRequestTokens(generateData)
+  };
+}
+async function takePendingMainRequest() {
+  const pending = pendingMainRequest;
+  pendingMainRequest = null;
+  if (!pending) {
+    return null;
+  }
+  const input = await pending.inputPromise;
+  return { ts: pending.ts, input };
+}
+function discardPendingMainRequest() {
+  pendingMainRequest = null;
+}
+async function onGenerateAfterData(generateData, dryRun) {
+  const type = takeGenerationType();
+  if (dryRun || isQuietType(type)) {
+    return;
+  }
+  beginMainRequest(generateData);
+}
+async function finalizeMainRequest({ text, model, message }, index) {
+  const pending = await takePendingMainRequest();
+  if (!pending) {
+    return false;
+  }
+  const output = await countTextAsync(text ?? "");
+  const capturedModel = model ?? "";
+  if (message) {
+    await updateMessageTokens(message, { input: pending.input, output });
+  }
+  appendRequest({
+    kind: "main",
+    floor: Number.isInteger(index) ? index : null,
+    model: capturedModel,
+    input: pending.input,
+    output,
+    ts: pending.ts
+  });
+  return true;
+}
 async function onMessageSent(data) {
   const message = resolveMessage(data);
-  if (!message || message.is_user !== true) {
+  if (!message) {
     return;
   }
   await updateMessageTokens(message);
@@ -1817,10 +1934,21 @@ async function onMessageSent(data) {
 }
 async function onMessageReceived(data) {
   const message = resolveMessage(data);
-  if (!message || message.is_user === true) {
+  if (!message) {
     return;
   }
-  await updateMessageTokens(message, { usePendingInput: true });
+  const finalized = await finalizeMainRequest({
+    text: message.mes,
+    model: message?.extra?.model || "",
+    message
+  }, resolveMessageIndex(data));
+  if (!finalized) {
+    await updateMessageTokens(message);
+  }
+  refreshPanel();
+}
+async function onImpersonateReady(text) {
+  await finalizeMainRequest({ text, model: "" }, null);
   refreshPanel();
 }
 async function onMessageEdited(data) {
@@ -1836,7 +1964,7 @@ async function onMessageSwiped(data) {
   if (!message) {
     return;
   }
-  await updateMessageTokens(message, { usePendingInput: true });
+  await updateMessageTokens(message);
   refreshPanel();
 }
 function onChatChanged() {
@@ -1845,7 +1973,7 @@ function onChatChanged() {
   refreshPanel();
 }
 function onGenerationStopped() {
-  clearPendingInput();
+  discardPendingMainRequest();
 }
 function subscribe(eventSource, eventType, handler) {
   if (!eventType || typeof eventSource?.on !== "function") {
@@ -1862,8 +1990,10 @@ function registerEvents() {
     return;
   }
   subscribe(eventSource, eventTypes.APP_READY, () => mountPanel());
+  subscribe(eventSource, eventTypes.GENERATE_AFTER_DATA, onGenerateAfterData);
   subscribe(eventSource, eventTypes.MESSAGE_SENT, onMessageSent);
   subscribe(eventSource, eventTypes.MESSAGE_RECEIVED, onMessageReceived);
+  subscribe(eventSource, eventTypes.IMPERSONATE_READY, onImpersonateReady);
   subscribe(eventSource, eventTypes.MESSAGE_EDITED, onMessageEdited);
   subscribe(eventSource, eventTypes.MESSAGE_SWIPED, onMessageSwiped);
   subscribe(eventSource, eventTypes.MESSAGE_DELETED, onChatChanged);

@@ -4,10 +4,10 @@ SillyTavern 扩展：统计每条消息的 token 消耗与由其它脚本触发�
 
 ## 功能
 
-- **主生成统计**：每条消息记录输入（本轮 prompt 上下文 token）与输出（回复文本 token），分项累计。
+- **主生成统计**：每次生成（含同一楼层的重新生成/续写）记一条请求记录：输入为该轮实际发送 prompt 的 token 数（由 SillyTavern 组装完 prompt 后的 `GENERATE_AFTER_DATA` 载荷用 ST 分词器计数），输出为回复文本 token。
 - **附加调用统计**：捕获同源 iframe（酒馆助手脚本）对 `/api/backends/chat-completions/generate` 的调用，按内容无关信号分类为 **剧情推进 / 填表 / 其他**，并归层到对应楼层。
 - **费用估算**：基于 LiteLLM 价格库，按模型单价换算成本；剧情推进 / 填表可单独指定模型计价；**成本不持久化**，展示时现算，更新价格库后历史数据自动重估。
-- **悬浮面板**：主生成与三类附加调用各自显示 calls / in / out / cost，附楼层明细表（含 P/F/O 徽标）与设置区。
+- **悬浮面板**：主生成与三类附加调用各自显示 calls / in / out / cost，下方是**按请求追加的流水列表**（每条 AI 请求一行：时间 / 类型 / 楼层 / 模型 / in / out / 费用），同一楼层的多次生成以 `↻2`、`↻3` 标注；设置区可配置模型与分类。
 
 ## 安装
 
@@ -50,7 +50,8 @@ npm run watch     # 开发时监听
 
 ## 数据存放
 
-- 每条消息的统计写入该消息对象的 `extra.token_monitor`，随聊天 JSONL 落盘。
+- **请求流水**（按请求追加，一条 AI 请求一条记录）：`chat_metadata.token_monitor_requests`，含类型（主生成 / 剧情推进 / 填表 / 其他）、归层楼层、模型、输入/输出 token；面板列表与各项汇总均由此现算。
+- 每条消息的快照写入该消息对象的 `extra.token_monitor`（当前楼层的输入/输出与附加调用聚合），随聊天 JSONL 落盘。
 - 每个聊天的汇总写入 `chat_metadata.token_monitor`；无法归层的附加调用写入 `chat_metadata.token_monitor_unattributed`。
 - 配置写入 `extensionSettings.token_monitor`（服务器 `settings.json`）；价格库缓存于浏览器 IndexedDB `token_monitor_pricing`。
 
@@ -60,9 +61,10 @@ npm run watch     # 开发时监听
 
 ## 已知限制
 
-- 剧情推进/填表路径不回传 usage，token 由扩展自行计数（若响应恰带 usage 则优先采用），不与服务商官方用量对账。
-- 历史 AI 消息的输入 prompt token 无法精确还原，缺失时以 `—` 显示。
-- 归层依赖 `qrf_plot` / 楼层文本等信号，极端情况下可能落到"未归属"。
+- 输入 token 由扩展用 ST 分词器对实际请求内容计数，不与服务商官方用量对账（差值来自服务端分词/特殊标记）；附加调用若响应恰带 usage 则优先采用。
+- SillyTavern 的 `generate_interceptor` 传入的 `contextSize` 是**可用 prompt 预算上限**（上下文窗口 − 回复长度），并非实际输入量，本扩展不使用该值。
+- 安装本扩展之前的请求不会出现在流水中；对应消息的输入缺失时以 `—` 显示。
+- 归层依赖 `qrf_plot` / 楼层文本等信号，极端情况下可能落到"未归属"（楼层列显示 `—`）。
 - 仅支持自定义 API（Chat Completion）模式下经由该端点的附加调用；`generateRaw` / 主 API 的附加调用不在范围内。
 
 ## 许可

@@ -1,22 +1,27 @@
 /**
- * Persistence layer for per-message token stats.
+ * Persistence layer for token stats.
  *
- * Two kinds of usage are tracked:
- *  - Main chat generation: `input` (prompt context size) and `output` (reply
- *    text) per message, stored on `message.extra.token_monitor`.
- *  - Auxiliary AI calls made by other scripts (plot progression, table filling,
- *    other same-endpoint calls): aggregated per message under
- *    `aux.{plot,fill,other}`, or parked on
- *    `chatMetadata.token_monitor_unattributed` when no floor can be resolved.
+ * Two layers are kept:
+ *  - A per-request log (`chatMetadata.token_monitor_requests`): one append-only
+ *    entry per AI request — main generation (including swipes/continues of the
+ *    same floor), plot progression, table filling and other auxiliary calls.
+ *    Entries keep their own model/input/output and the floor they were
+ *    attributed to, so re-generations of one floor stay visible as separate
+ *    rows.
+ *  - Per-message stats (`message.extra.token_monitor`): a snapshot of the
+ *    current content of each floor — `input`/`output` for the main generation
+ *    plus `aux.{plot,fill,other}` aggregates (or
+ *    `chatMetadata.token_monitor_unattributed` when no floor resolves).
  *
  * Everything lives inside the chat JSONL file (message lines + header), so it is
  * persisted to disk together with the chat.
  */
 
-import { countTextAsync, consumePendingInput } from './tokens.js';
+import { countTextAsync } from './tokens.js';
 
 export const DATA_KEY = 'token_monitor';
 export const UNATTRIBUTED_KEY = 'token_monitor_unattributed';
+export const REQUESTS_KEY = 'token_monitor_requests';
 
 const SCHEMA_VERSION = 2;
 const SAVE_DEBOUNCE_MS = 1500;
@@ -113,33 +118,6 @@ function addToCategory(category, { model, input, output }) {
     category.byModel[key] = entry;
 }
 
-function mergeCategory(target, source) {
-    target.calls += toNumber(source.calls);
-    target.input += toNumber(source.input);
-    target.output += toNumber(source.output);
-    for (const [model, value] of Object.entries(source.byModel ?? {})) {
-        const entry = target.byModel[model] ?? { calls: 0, input: 0, output: 0 };
-        entry.calls += toNumber(value.calls);
-        entry.input += toNumber(value.input);
-        entry.output += toNumber(value.output);
-        target.byModel[model] = entry;
-    }
-}
-
-function aggregateAuxByModel(aux) {
-    const result = {};
-    for (const category of AUX_CATEGORIES) {
-        for (const [model, value] of Object.entries(aux[category].byModel)) {
-            const entry = result[model] ?? { calls: 0, input: 0, output: 0 };
-            entry.calls += toNumber(value.calls);
-            entry.input += toNumber(value.input);
-            entry.output += toNumber(value.output);
-            result[model] = entry;
-        }
-    }
-    return result;
-}
-
 function buildData({ input, output, aux, ts }) {
     return {
         v: SCHEMA_VERSION,
@@ -163,11 +141,122 @@ function attach(message, data) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Request log (append-only, one entry per AI request)
+ * ------------------------------------------------------------------ */
+
+function getRequestLog() {
+    const context = ctx();
+    if (!context?.chatMetadata) {
+        return [];
+    }
+    if (!Array.isArray(context.chatMetadata[REQUESTS_KEY])) {
+        context.chatMetadata[REQUESTS_KEY] = [];
+    }
+    return context.chatMetadata[REQUESTS_KEY];
+}
+
+/** Normalized copy of the request log, sorted by request time. */
+export function listRequests() {
+    return getRequestLog()
+        .map(entry => ({ ...entry, floor: Number.isInteger(entry.floor) ? entry.floor : null }))
+        .sort((a, b) => (a.ts - b.ts) || (a.id - b.id));
+}
+
+/**
+ * Append one request record to the log.
+ * @param {{ kind: 'main'|'plot'|'fill'|'other', floor?: number|null, model?: string,
+ *           input?: number|null, output?: number|null, ts?: number }} record
+ * @returns {object|null} the stored entry (mutable; use `patchRequest` to update)
+ */
+export function appendRequest(record) {
+    const context = ctx();
+    if (!context?.chatMetadata || !record) {
+        return null;
+    }
+
+    const log = getRequestLog();
+    const lastId = log.length ? toNumber(log[log.length - 1].id) : 0;
+    const entry = {
+        id: lastId + 1,
+        ts: toNumber(record.ts) || Date.now(),
+        kind: record.kind,
+        floor: Number.isInteger(record.floor) ? record.floor : null,
+        model: typeof record.model === 'string' ? record.model : '',
+        input: Number.isFinite(Number(record.input)) && record.input !== null ? Number(record.input) : null,
+        output: Number.isFinite(Number(record.output)) && record.output !== null ? Number(record.output) : null,
+    };
+    log.push(entry);
+    scheduleSave();
+    return entry;
+}
+
+/** Patch fields of an existing request record (e.g. late floor attribution). */
+export function patchRequest(id, fields) {
+    const entry = getRequestLog().find(item => toNumber(item.id) === toNumber(id));
+    if (!entry || !fields) {
+        return null;
+    }
+    if ('floor' in fields) {
+        entry.floor = Number.isInteger(fields.floor) ? fields.floor : null;
+    }
+    if ('input' in fields) {
+        entry.input = Number.isFinite(Number(fields.input)) ? Number(fields.input) : null;
+    }
+    if ('output' in fields) {
+        entry.output = Number.isFinite(Number(fields.output)) ? Number(fields.output) : null;
+    }
+    if ('model' in fields && typeof fields.model === 'string') {
+        entry.model = fields.model;
+    }
+    scheduleSave();
+    return entry;
+}
+
+/** Aggregate the request log: main totals plus per-kind aux usage. */
+export function computeRequestSummary() {
+    const main = { calls: 0, input: 0, output: 0, unknownInput: false };
+    const aux = emptyAux();
+
+    for (const entry of getRequestLog()) {
+        const input = entry.input === null ? 0 : toNumber(entry.input);
+        const output = entry.output === null ? 0 : toNumber(entry.output);
+
+        if (entry.kind === 'main') {
+            main.calls += 1;
+            main.input += input;
+            main.output += output;
+            if (entry.input === null) {
+                main.unknownInput = true;
+            }
+            continue;
+        }
+
+        const category = aux[entry.kind];
+        if (category) {
+            addToCategory(category, { model: entry.model, input, output });
+        }
+    }
+
+    return {
+        main,
+        aux,
+        totalInput: main.input,
+        totalOutput: main.output,
+        total: main.input + main.output,
+    };
+}
+
+/* ------------------------------------------------------------------ *
  * Main generation (input / output per message)
  * ------------------------------------------------------------------ */
 
-/** Record or refresh the main-generation token stats of a single message. */
-export async function updateMessageTokens(message, { usePendingInput = false } = {}) {
+/**
+ * Record or refresh the main-generation token stats of a single message.
+ * `input`/`output` are explicit overrides coming from the captured request;
+ * when omitted they fall back to the natural defaults (own text for user
+ * messages, preserved input / recounted text for AI messages).
+ */
+export async function updateMessageTokens(message, { input, output } = {}) {
     if (!isTrackable(message)) {
         return null;
     }
@@ -176,20 +265,19 @@ export async function updateMessageTokens(message, { usePendingInput = false } =
     const own = await countTextAsync(message.mes);
     const isUser = message.is_user === true;
 
-    const input = isUser
-        ? own
-        : (usePendingInput ? (consumePendingInput() ?? existing.input ?? null) : (existing.input ?? null));
-    const output = isUser ? 0 : own;
+    const resolvedInput = input !== undefined ? input : (isUser ? own : (existing.input ?? null));
+    const resolvedOutput = output !== undefined ? output : (isUser ? 0 : own);
 
-    const data = buildData({ input, output, aux: existing.aux, ts: existing.ts });
+    const data = buildData({ input: resolvedInput, output: resolvedOutput, aux: existing.aux, ts: existing.ts });
     attach(message, data);
     scheduleSave();
     return data;
 }
 
 /**
- * Recompute own-text tokens for every message.
- * Preserves known prompt inputs and any recorded aux data.
+ * Recompute own-text tokens for every message and for the request log.
+ * Preserves known prompt inputs and any recorded aux data; only the *current*
+ * text of each floor is recounted, superseded generations keep their counts.
  */
 export async function recomputeChat() {
     const context = ctx();
@@ -207,6 +295,23 @@ export async function recomputeChat() {
         const output = isUser ? 0 : own;
 
         attach(message, buildData({ input, output, aux: existing.aux, ts: existing.ts }));
+    }
+
+    const lastMainByFloor = new Map();
+    for (const entry of getRequestLog()) {
+        if (entry.kind === 'main' && Number.isInteger(entry.floor)) {
+            lastMainByFloor.set(entry.floor, entry);
+        }
+    }
+    for (const [floor, entry] of lastMainByFloor) {
+        const message = chat[floor];
+        if (!isTrackable(message)) {
+            continue;
+        }
+        const own = await countTextAsync(message.mes);
+        if (own !== null) {
+            entry.output = own;
+        }
     }
 
     await flushSave();
@@ -310,6 +415,12 @@ function findLatestAiFloor() {
     return null;
 }
 
+function indexOfMessage(message) {
+    const chat = ctx()?.chat ?? [];
+    const index = chat.indexOf(message);
+    return index >= 0 ? index : null;
+}
+
 function addAuxToMessage(message, category, record) {
     if (!isTrackable(message)) {
         addUnattributed(category, record);
@@ -361,6 +472,7 @@ async function recordPlotUsage(record) {
         return;
     }
 
+    patchRequest(record.logId, { floor: indexOfMessage(target) });
     addAuxToMessage(target, 'plot', record);
     scheduleSave();
 }
@@ -377,15 +489,18 @@ function recordFillUsage(record) {
         return;
     }
 
+    patchRequest(record.logId, { floor: indexOfMessage(target) });
     addAuxToMessage(target, 'fill', record);
     scheduleSave();
 }
 
 /**
- * Attribute one classified auxiliary call.
- * @param {{ category: 'plot'|'fill'|'other', model?: string, input?: number,
- *           output?: number, chatLenAt?: number, responseText?: string,
- *           requestTexts?: Array<{content?: string}>, ts?: number }} record
+ * Attribute one classified auxiliary call to its floor (message-level
+ * aggregates) and update the floor of its request-log entry.
+ * @param {{ category: 'plot'|'fill'|'other', logId?: number, model?: string,
+ *           input?: number, output?: number, chatLenAt?: number,
+ *           responseText?: string, requestTexts?: Array<{content?: string}>,
+ *           ts?: number }} record
  */
 export async function recordAuxUsage(record) {
     if (!record || !AUX_CATEGORIES.includes(record.category)) {
@@ -409,83 +524,18 @@ export async function recordAuxUsage(record) {
  * Summary
  * ------------------------------------------------------------------ */
 
-export function computeChatSummary() {
-    const context = ctx();
-    const chat = context?.chat ?? [];
-
-    let totalInput = 0;
-    let totalOutput = 0;
-    let ownTotal = 0;
-    let counted = 0;
-    let messageCount = 0;
-    let lastInput = null;
-
-    const aux = emptyAux();
-
-    for (const message of chat) {
-        if (!message || message.is_system === true) {
-            continue;
-        }
-        messageCount += 1;
-
-        const data = getMessageTokens(message);
-        if (!data) {
-            continue;
-        }
-
-        const input = Number(data.input);
-        const output = Number(data.output);
-        const hasInput = Number.isFinite(input);
-        const hasOutput = Number.isFinite(output);
-
-        totalInput += hasInput ? input : 0;
-        totalOutput += hasOutput ? output : 0;
-        ownTotal += message.is_user === true
-            ? (hasInput ? input : 0)
-            : (hasOutput ? output : 0);
-        counted += 1;
-
-        if (message.is_user !== true && hasInput) {
-            lastInput = input;
-        }
-
-        if (data.aux) {
-            const normalized = normalizeAux(data.aux);
-            for (const category of AUX_CATEGORIES) {
-                mergeCategory(aux[category], normalized[category]);
-            }
-        }
-    }
-
-    const unattributed = normalizeAux(context?.chatMetadata?.[UNATTRIBUTED_KEY]);
-    for (const category of AUX_CATEGORIES) {
-        mergeCategory(aux[category], unattributed[category]);
-    }
-
-    return {
-        totalInput,
-        totalOutput,
-        total: totalInput + totalOutput,
-        ownTotal,
-        counted,
-        messageCount,
-        lastInput,
-        aux,
-        auxByModel: aggregateAuxByModel(aux),
-    };
-}
-
 export function updateChatSummary() {
     const context = ctx();
     if (!context?.chatMetadata) {
         return;
     }
 
-    const summary = computeChatSummary();
+    const summary = computeRequestSummary();
     context.chatMetadata[DATA_KEY] = {
         v: SCHEMA_VERSION,
-        totalInput: summary.totalInput,
-        totalOutput: summary.totalOutput,
+        totalInput: summary.main.input,
+        totalOutput: summary.main.output,
+        calls: summary.main.calls,
         aux: summary.aux,
         updatedAt: Date.now(),
     };
@@ -535,6 +585,7 @@ export function clearChatTokenData() {
     if (context?.chatMetadata) {
         delete context.chatMetadata[DATA_KEY];
         delete context.chatMetadata[UNATTRIBUTED_KEY];
+        delete context.chatMetadata[REQUESTS_KEY];
     }
 
     void flushSave();
