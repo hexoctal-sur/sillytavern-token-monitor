@@ -18,7 +18,6 @@ const MARKER_STORAGE_KEY = 'token_monitor_markers';
 
 const AUX_LABELS = { plot: '剧情推进', fill: '填表', other: '其他' };
 const KIND_SHORT = { main: '主', plot: '剧情', fill: '填表', other: '其他' };
-const KIND_BADGE = { main: 'M', plot: 'P', fill: 'F', other: 'O' };
 
 const defaultSettings = Object.freeze({
     mainGenModel: '',
@@ -258,9 +257,7 @@ function buildPanelSkeleton() {
             </div>
             <div class="tm-aux" id="tm-aux"></div>
             <div class="tm-list">
-                <div class="tm-requests-head">
-                    <span>#</span><span>时间</span><span>类型</span><span>楼层</span><span>模型</span><span>in</span><span>out</span><span>费用</span>
-                </div>
+                <div class="tm-requests-title">请求流水</div>
                 <div class="tm-requests" id="tm-requests"></div>
             </div>
             <div class="tm-settings">
@@ -573,9 +570,12 @@ function formatRequestTime(ts) {
 }
 
 /**
- * Per-request list: one row per AI request, appended in request order —
- * main generations (including every re-generation of a floor), plot
+ * Per-request list: one 2×3 table block per AI request, appended in request
+ * order — main generations (including every re-generation of a floor), plot
  * progression, table filling and other auxiliary calls.
+ *
+ *   | 类型 / 楼层 | 出 token | 模型   |
+ *   | 时间        | 入 token | 费用   |
  */
 function renderRequests() {
     const container = document.getElementById('tm-requests');
@@ -593,7 +593,7 @@ function renderRequests() {
     }
 
     const regenCounter = new Map();
-    const rows = entries.map((entry, index) => {
+    const rows = entries.map(entry => {
         const kind = entry.kind in KIND_SHORT ? entry.kind : 'other';
         const floorKnown = Number.isInteger(entry.floor);
         let regen = '';
@@ -601,7 +601,7 @@ function renderRequests() {
             const seen = (regenCounter.get(entry.floor) ?? 0) + 1;
             regenCounter.set(entry.floor, seen);
             if (seen > 1) {
-                regen = ` <span class="tm-regen">↻${seen}</span>`;
+                regen = `<span class="tm-regen">↻${seen}</span>`;
             }
         }
 
@@ -613,24 +613,22 @@ function renderRequests() {
             ? `模型 ${entry.model || '(空)'} 不在价格库，按 ${priced.fallbackModel} 计价`
             : (entry.model || '');
 
-        const floorText = floorKnown ? `${entry.floor + 1}` : '—';
+        const floorText = floorKnown ? `${entry.floor + 1}楼` : '未归层';
         const modelText = entry.model || '—';
 
         return `
-            <div class="tm-request-row" data-floor="${floorKnown ? entry.floor : ''}">
-                <span class="tm-request-index">${index + 1}</span>
-                <span class="tm-request-time">${formatRequestTime(entry.ts)}</span>
-                <span class="tm-request-kind"><span class="tm-badge tm-badge-${kind}" title="${AUX_LABELS[kind] ?? '主生成'}">${KIND_BADGE[kind]}${KIND_SHORT[kind]}</span></span>
-                <span class="tm-request-floor">${floorText}${regen}</span>
+            <div class="tm-request" data-floor="${floorKnown ? entry.floor : ''}">
+                <span class="tm-request-type"><span class="tm-badge tm-badge-${kind}" title="${AUX_LABELS[kind] ?? '主生成'}">${KIND_SHORT[kind]}</span><span class="tm-request-floor">${floorText}${regen}</span></span>
+                <span class="tm-request-out">出 ${entry.output === null ? '—' : formatNumber(entry.output)}</span>
                 <span class="tm-request-model" title="${escapeHtml(modelText)}">${escapeHtml(modelText)}</span>
-                <span class="tm-request-in">${entry.input === null ? '—' : formatNumber(entry.input)}</span>
-                <span class="tm-request-out">${entry.output === null ? '—' : formatNumber(entry.output)}</span>
+                <span class="tm-request-time">${formatRequestTime(entry.ts)}</span>
+                <span class="tm-request-in">入 ${entry.input === null ? '—' : formatNumber(entry.input)}</span>
                 <span class="tm-request-cost" title="${escapeHtml(costTitle)}">${costText}</span>
             </div>`;
     });
 
     container.innerHTML = rows.join('');
-    container.querySelectorAll('.tm-request-row').forEach(row => {
+    container.querySelectorAll('.tm-request').forEach(row => {
         const floor = row.getAttribute('data-floor');
         if (floor === '') {
             return;
