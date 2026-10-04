@@ -162,15 +162,22 @@ function setText(id, text) {
  * 填表), which is flagged in the UI.
  * ------------------------------------------------------------------ */
 
-function fallbackModelFor(kind, settings) {
+/** Model explicitly configured for a request kind ('' = not configured). */
+function configuredModelFor(kind, settings) {
     if (kind === 'main') {
-        return settings.mainGenModel || detectCurrentModel();
+        return String(settings.mainGenModel ?? '').trim();
     }
-    return settings[AUX_MODEL_SETTINGS[kind]] ?? '';
+    return String(settings[AUX_MODEL_SETTINGS[kind]] ?? '').trim();
 }
 
+/**
+ * Price one request record at display time.
+ *
+ * The model configured in the settings wins, so editing it and saving re-prices
+ * the whole history; otherwise the captured model name is used, then (for main
+ * generation) the currently detected model.
+ */
 function recordCost(entry, rate, settings) {
-    const fallbackModel = fallbackModelFor(entry.kind, settings);
     const usage = {
         input: entry.input ?? 0,
         output: entry.output ?? 0,
@@ -179,16 +186,27 @@ function recordCost(entry, rate, settings) {
         rate,
     };
 
-    let result = computeCost({ ...usage, model: entry.model });
+    const candidates = [];
+    const configured = configuredModelFor(entry.kind, settings);
+    if (configured) {
+        candidates.push({ model: configured, source: 'configured' });
+    }
+    if (entry.model && entry.model !== configured) {
+        candidates.push({ model: entry.model, source: 'captured' });
+    }
+    const auto = entry.kind === 'main' ? detectCurrentModel().trim() : '';
+    if (auto && auto !== configured && auto !== entry.model) {
+        candidates.push({ model: auto, source: 'auto' });
+    }
 
-    if (!result.found && fallbackModel) {
-        const fallback = computeCost({ ...usage, model: fallbackModel });
-        if (fallback.found) {
-            return { found: true, cost: fallback.cost, pricedAtFallback: true, fallbackModel };
+    for (const candidate of candidates) {
+        const result = computeCost({ ...usage, model: candidate.model });
+        if (result.found) {
+            return { found: true, cost: result.cost, source: candidate.source, pricingModel: candidate.model };
         }
     }
 
-    return { found: result.found, cost: result.cost, pricedAtFallback: false, fallbackModel };
+    return { found: false, cost: null, source: null, pricingModel: '' };
 }
 
 function sumRecordsCost(entries, rate, settings) {
@@ -196,19 +214,23 @@ function sumRecordsCost(entries, rate, settings) {
     let anyFound = false;
     let unknown = false;
     let fallback = false;
+    let fallbackModel = '';
 
     for (const entry of entries) {
         const result = recordCost(entry, rate, settings);
         if (result.found) {
             cost += result.cost;
             anyFound = true;
-            fallback = fallback || result.pricedAtFallback;
+            if (result.source !== 'captured') {
+                fallback = true;
+                fallbackModel = result.pricingModel;
+            }
         } else if ((entry.input ?? 0) > 0 || (entry.output ?? 0) > 0) {
             unknown = true;
         }
     }
 
-    return { cost: anyFound ? cost : null, unknown, fallback };
+    return { cost: anyFound ? cost : null, unknown, fallback, fallbackModel };
 }
 
 /* ------------------------------------------------------------------ *
@@ -301,6 +323,7 @@ function buildPanelSkeleton() {
                     </label>
                     <div class="tm-price-status" id="tm-price-status">未加载价格库</div>
                     <div class="tm-actions">
+                        <div id="tm-save-settings" class="menu_button">保存设置</div>
                         <div id="tm-update-prices" class="menu_button">更新价格库</div>
                         <div id="tm-recount" class="menu_button">重新统计</div>
                         <div id="tm-refresh" class="menu_button">刷新</div>
@@ -470,44 +493,11 @@ function bindSettingsInputs() {
     plotMarkers.value = markers.plotMarkers.join('\n');
     fillMarkers.value = markers.fillMarkers.join('\n');
 
-    const onModelChanged = key => value => {
-        const current = getSettings();
-        current[key] = value;
-        saveSettings();
-        refreshPanel();
-    };
+    // The form is only a draft: nothing is stored or applied until 保存设置
+    // is pressed, which also re-prices every request with the new models/rate.
+    combos = [modelInput, plotModelInput, fillModelInput].map(input => attachModelCombo(input));
 
-    const modelCommit = {
-        'tm-set-model': onModelChanged('mainGenModel'),
-        'tm-set-plot-model': onModelChanged('plotModel'),
-        'tm-set-fill-model': onModelChanged('fillModel'),
-    };
-    combos = [modelInput, plotModelInput, fillModelInput].map(input => attachModelCombo(input, { onCommit: modelCommit[input.id] }));
-
-    rateInput.addEventListener('input', () => {
-        const current = getSettings();
-        current.rate = Number(rateInput.value) || 1;
-        saveSettings();
-        refreshPanel();
-    });
-
-    modeSelect.addEventListener('change', () => {
-        const current = getSettings();
-        current.classifyMode = modeSelect.value === 'markers-only' ? 'markers-only' : 'auto';
-        saveSettings();
-        applyClassification();
-    });
-
-    const onMarkersChanged = () => {
-        saveMarkers({
-            plotMarkers: parseMarkers(plotMarkers.value),
-            fillMarkers: parseMarkers(fillMarkers.value),
-        });
-        applyClassification();
-    };
-    plotMarkers.addEventListener('input', onMarkersChanged);
-    fillMarkers.addEventListener('input', onMarkersChanged);
-
+    document.getElementById('tm-save-settings').addEventListener('click', handleSaveSettings);
     document.getElementById('tm-update-prices').addEventListener('click', handleUpdatePrices);
     document.getElementById('tm-refresh').addEventListener('click', () => {
         rescanAuxFrames();
@@ -593,6 +583,30 @@ function applyClassification() {
     });
 }
 
+/** Persist the settings form and re-price everything with the saved values. */
+function handleSaveSettings() {
+    const current = getSettings();
+    current.mainGenModel = document.getElementById('tm-set-model').value.trim();
+    current.plotModel = document.getElementById('tm-set-plot-model').value.trim();
+    current.fillModel = document.getElementById('tm-set-fill-model').value.trim();
+    current.rate = Number(document.getElementById('tm-set-rate').value) || 1;
+    current.classifyMode = document.getElementById('tm-set-mode').value === 'markers-only' ? 'markers-only' : 'auto';
+    saveSettings();
+
+    saveMarkers({
+        plotMarkers: parseMarkers(document.getElementById('tm-set-plot-markers').value),
+        fillMarkers: parseMarkers(document.getElementById('tm-set-fill-markers').value),
+    });
+    applyClassification();
+
+    // Costs are computed at display time, so a refresh re-prices every request
+    // record with the just-saved models and exchange rate.
+    refreshPanel();
+    if (typeof toastr !== 'undefined') {
+        toastr.success('设置已保存，费用已按当前配置重新计算');
+    }
+}
+
 async function handleUpdatePrices() {
     const button = document.getElementById('tm-update-prices');
     button?.classList.add('disabled');
@@ -676,11 +690,13 @@ function renderRequests() {
 
         const priced = recordCost(entry, rate, settings);
         const costText = priced.found
-            ? `${formatCost(priced.cost, rate)}${priced.pricedAtFallback ? '*' : ''}`
+            ? `${formatCost(priced.cost, rate)}${priced.source === 'captured' ? '' : '*'}`
             : '—';
-        const costTitle = priced.pricedAtFallback
-            ? `模型 ${entry.model || '(空)'} 不在价格库，按 ${priced.fallbackModel} 计价`
-            : (entry.model || '');
+        const costTitle = !priced.found
+            ? '未能在价格库中匹配到模型，无法计价'
+            : (priced.source === 'captured'
+                ? (entry.model || '')
+                : `按 ${priced.pricingModel} 计价${entry.model ? `（请求模型：${entry.model}）` : ''}`);
 
         const floorText = floorKnown ? `${entry.floor}楼` : '未归层';
         const modelText = entry.model || '—';
@@ -720,9 +736,11 @@ function renderAux(entries, rate, settings) {
         const input = own.reduce((sum, entry) => sum + (entry.input ?? 0), 0);
         const output = own.reduce((sum, entry) => sum + (entry.output ?? 0), 0);
         const priced = sumRecordsCost(own, rate, settings);
-        const costText = priced.cost === null ? '—' : `${formatCost(priced.cost, rate)}${priced.unknown ? '*' : ''}`;
+        const costText = priced.cost === null
+            ? '—'
+            : `${formatCost(priced.cost, rate)}${priced.unknown || priced.fallback ? '*' : ''}`;
         const modelNote = priced.fallback
-            ? ` <i>按 ${escapeHtml(fallbackModelFor(category, settings))} 计价</i>`
+            ? ` <i>按 ${escapeHtml(priced.fallbackModel)} 计价</i>`
             : '';
         return `
             <div class="tm-row tm-aux-row">
@@ -748,7 +766,7 @@ export function refreshPanel() {
     const mainPriced = sumRecordsCost(mainEntries, rate, settings);
     const mainCostText = mainPriced.cost === null
         ? '—'
-        : `${formatCost(mainPriced.cost, rate)}${mainPriced.unknown ? '*' : ''}`;
+        : `${formatCost(mainPriced.cost, rate)}${mainPriced.unknown || mainPriced.fallback ? '*' : ''}`;
 
     setText('tm-main-calls', `${summary.main.calls}次`);
     setText('tm-main-in', `in ${formatNumber(summary.main.input)}${summary.main.unknownInput ? '*' : ''}`);
