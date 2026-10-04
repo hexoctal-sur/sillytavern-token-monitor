@@ -178,7 +178,8 @@ export function listRequests() {
 /**
  * Append one request record to the log.
  * @param {{ kind: 'main'|'plot'|'fill'|'other', floor?: number|null, model?: string,
- *           input?: number|null, output?: number|null, ts?: number }} record
+ *           input?: number|null, output?: number|null, cachedInput?: number,
+ *           cacheWriteInput?: number, ts?: number }} record
  * @returns {object|null} the stored entry (mutable; use `patchRequest` to update)
  */
 export function appendRequest(record) {
@@ -197,6 +198,8 @@ export function appendRequest(record) {
         model: typeof record.model === 'string' ? record.model : '',
         input: Number.isFinite(Number(record.input)) && record.input !== null ? Number(record.input) : null,
         output: Number.isFinite(Number(record.output)) && record.output !== null ? Number(record.output) : null,
+        cachedInput: Math.max(0, toNumber(record.cachedInput)),
+        cacheWriteInput: Math.max(0, toNumber(record.cacheWriteInput)),
     };
     log.push(entry);
     scheduleSave();
@@ -217,6 +220,12 @@ export function patchRequest(id, fields) {
     }
     if ('output' in fields) {
         entry.output = Number.isFinite(Number(fields.output)) ? Number(fields.output) : null;
+    }
+    if ('cachedInput' in fields) {
+        entry.cachedInput = Math.max(0, toNumber(fields.cachedInput));
+    }
+    if ('cacheWriteInput' in fields) {
+        entry.cacheWriteInput = Math.max(0, toNumber(fields.cacheWriteInput));
     }
     if ('model' in fields && typeof fields.model === 'string') {
         entry.model = fields.model;

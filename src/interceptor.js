@@ -15,7 +15,7 @@
  *   user markers > fill window > plot window > response regression > other.
  */
 
-import { countMsgTokens, countTokensCached } from './tokens.js';
+import { countMsgTokens, countTokensCached, extractUsageTokens } from './tokens.js';
 import { recordAuxUsage, hasPlotMatch, appendRequest } from './store.js';
 
 const GENERATE_PATH = '/api/backends/chat-completions/generate';
@@ -484,16 +484,16 @@ function ingest(record) {
 
 async function handleIngest(record) {
     try {
-        const usage = record.usage ?? null;
-        const usageInput = Number(usage?.prompt_tokens);
-        const usageOutput = Number(usage?.completion_tokens);
+        const usage = extractUsageTokens(record.usage);
 
-        const input = Number.isFinite(usageInput)
-            ? usageInput
+        const input = usage && usage.input !== null
+            ? usage.input
             : await countMsgTokens(record.requestTexts);
-        const output = Number.isFinite(usageOutput)
-            ? usageOutput
-            : await countTokensCached(record.responseText ?? '');
+        const output = (usage && usage.output !== null)
+            ? usage.output
+            : (await countTokensCached(record.responseText ?? ''));
+        const cachedInput = usage?.cachedInput ?? 0;
+        const cacheWriteInput = usage?.cacheWriteInput ?? 0;
 
         const category = resolveCategory(record);
         const entry = appendRequest({
@@ -502,6 +502,8 @@ async function handleIngest(record) {
             model: record.model,
             input: input ?? 0,
             output: output ?? 0,
+            cachedInput,
+            cacheWriteInput,
             ts: record.ts,
         });
 

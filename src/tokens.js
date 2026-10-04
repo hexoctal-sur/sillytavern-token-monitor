@@ -166,3 +166,48 @@ export async function countRequestTokens(generateData) {
 export function clearTokenCache() {
     tokenCache.clear();
 }
+
+function firstFinite(...values) {
+    for (const value of values) {
+        if (value === null || value === undefined) {
+            continue;
+        }
+        const num = Number(value);
+        if (Number.isFinite(num)) {
+            return num;
+        }
+    }
+    return null;
+}
+
+/**
+ * Normalize an API `usage` object across provider shapes.
+ *
+ * Cache traffic is reported under different names:
+ *  - `prompt_tokens_details.cached_tokens` (OpenAI / OpenRouter / most proxies)
+ *  - `prompt_cache_hit_tokens` (DeepSeek)
+ *  - `cache_read_input_tokens` + `cache_creation_input_tokens` (Anthropic)
+ *  - `cached_content_token_count` / `cachedContentTokenCount` (Gemini)
+ *
+ * @returns {{ input: number|null, output: number|null, cachedInput: number, cacheWriteInput: number }|null}
+ */
+export function extractUsageTokens(usage) {
+    if (!usage || typeof usage !== 'object') {
+        return null;
+    }
+
+    const details = usage.prompt_tokens_details ?? usage.input_tokens_details ?? {};
+    return {
+        input: firstFinite(usage.prompt_tokens, usage.input_tokens),
+        output: firstFinite(usage.completion_tokens, usage.output_tokens),
+        cachedInput: firstFinite(
+            usage.cache_read_input_tokens,
+            usage.prompt_cache_hit_tokens,
+            usage.cached_tokens,
+            details.cached_tokens,
+            usage.cached_content_token_count,
+            usage.cachedContentTokenCount,
+        ) ?? 0,
+        cacheWriteInput: firstFinite(usage.cache_creation_input_tokens) ?? 0,
+    };
+}

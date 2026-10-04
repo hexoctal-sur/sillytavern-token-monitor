@@ -105,10 +105,14 @@ function setCatalogue(data, updatedAt) {
         if (!Number.isFinite(inputCost) && !Number.isFinite(outputCost)) {
             continue;
         }
+        const cacheReadCost = Number(value.cache_read_input_token_cost ?? value.input_cost_per_token_cache_hit);
+        const cacheWriteCost = Number(value.cache_creation_input_token_cost);
         const entry = {
             key,
             inputCost: Number.isFinite(inputCost) ? inputCost : 0,
             outputCost: Number.isFinite(outputCost) ? outputCost : 0,
+            cacheReadCost: Number.isFinite(cacheReadCost) ? cacheReadCost : null,
+            cacheWriteCost: Number.isFinite(cacheWriteCost) ? cacheWriteCost : null,
         };
         const lowerKey = key.toLowerCase();
         byKey.set(lowerKey, entry);
@@ -260,13 +264,44 @@ export function resolvePrice(model) {
 
 /**
  * Compute the cost of a usage in the display currency.
- * @param {{ input?: number, output?: number, model?: string, rate?: number }} params
+ *
+ * Prompt caching is priced per traffic class: cached input tokens are billed at
+ * the (much cheaper) cache-read rate, cache writes at the cache-creation rate,
+ * the rest at the plain input rate. Providers either include the cache traffic
+ * in `prompt_tokens` (OpenAI/DeepSeek style) or report it exclusively
+ * (Anthropic style) — both are normalized here.
+ *
+ * @param {{ input?: number, output?: number, cachedInput?: number, cacheWriteInput?: number, model?: string, rate?: number }} params
  */
-export function computeCost({ input, output, model, rate = 1 }) {
+export function computeCost({ input, output, cachedInput = 0, cacheWriteInput = 0, model, rate = 1 }) {
     const price = resolvePrice(model);
     if (!price.found) {
         return { found: false, cost: null, usd: null, price };
     }
-    const usd = (Number(input) || 0) * price.inputCost + (Number(output) || 0) * price.outputCost;
+
+    const toCount = (value) => {
+        const num = Number(value);
+        return Number.isFinite(num) && num > 0 ? num : 0;
+    };
+
+    const totalInput = toCount(input);
+    const totalOutput = toCount(output);
+    const cached = toCount(cachedInput);
+    const written = toCount(cacheWriteInput);
+
+    const uncachedInput = totalInput >= cached + written
+        ? totalInput - cached - written
+        : totalInput;
+
+    // Models without a cache price in the catalogue pay the plain input rate
+    // for every traffic class (no discount, same as pre-cache accounting).
+    const cacheReadCost = Number.isFinite(price.cacheReadCost) ? price.cacheReadCost : price.inputCost;
+    const cacheWriteCost = Number.isFinite(price.cacheWriteCost) ? price.cacheWriteCost : price.inputCost;
+
+    const usd = uncachedInput * price.inputCost
+        + cached * cacheReadCost
+        + written * cacheWriteCost
+        + totalOutput * price.outputCost;
+
     return { found: true, cost: usd * (Number(rate) || 1), usd, price };
 }

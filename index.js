@@ -103,6 +103,37 @@ async function countRequestTokens(generateData) {
   }
   return null;
 }
+function firstFinite(...values) {
+  for (const value of values) {
+    if (value === null || value === void 0) {
+      continue;
+    }
+    const num = Number(value);
+    if (Number.isFinite(num)) {
+      return num;
+    }
+  }
+  return null;
+}
+function extractUsageTokens(usage) {
+  if (!usage || typeof usage !== "object") {
+    return null;
+  }
+  const details = usage.prompt_tokens_details ?? usage.input_tokens_details ?? {};
+  return {
+    input: firstFinite(usage.prompt_tokens, usage.input_tokens),
+    output: firstFinite(usage.completion_tokens, usage.output_tokens),
+    cachedInput: firstFinite(
+      usage.cache_read_input_tokens,
+      usage.prompt_cache_hit_tokens,
+      usage.cached_tokens,
+      details.cached_tokens,
+      usage.cached_content_token_count,
+      usage.cachedContentTokenCount
+    ) ?? 0,
+    cacheWriteInput: firstFinite(usage.cache_creation_input_tokens) ?? 0
+  };
+}
 
 // src/store.js
 var DATA_KEY = "token_monitor";
@@ -236,7 +267,9 @@ function appendRequest(record) {
     floor: Number.isInteger(record.floor) ? record.floor : null,
     model: typeof record.model === "string" ? record.model : "",
     input: Number.isFinite(Number(record.input)) && record.input !== null ? Number(record.input) : null,
-    output: Number.isFinite(Number(record.output)) && record.output !== null ? Number(record.output) : null
+    output: Number.isFinite(Number(record.output)) && record.output !== null ? Number(record.output) : null,
+    cachedInput: Math.max(0, toNumber(record.cachedInput)),
+    cacheWriteInput: Math.max(0, toNumber(record.cacheWriteInput))
   };
   log.push(entry);
   scheduleSave();
@@ -255,6 +288,12 @@ function patchRequest(id, fields) {
   }
   if ("output" in fields) {
     entry.output = Number.isFinite(Number(fields.output)) ? Number(fields.output) : null;
+  }
+  if ("cachedInput" in fields) {
+    entry.cachedInput = Math.max(0, toNumber(fields.cachedInput));
+  }
+  if ("cacheWriteInput" in fields) {
+    entry.cacheWriteInput = Math.max(0, toNumber(fields.cacheWriteInput));
   }
   if ("model" in fields && typeof fields.model === "string") {
     entry.model = fields.model;
@@ -932,11 +971,11 @@ function ingest(record) {
 }
 async function handleIngest(record) {
   try {
-    const usage = record.usage ?? null;
-    const usageInput = Number(usage?.prompt_tokens);
-    const usageOutput = Number(usage?.completion_tokens);
-    const input = Number.isFinite(usageInput) ? usageInput : await countMsgTokens(record.requestTexts);
-    const output = Number.isFinite(usageOutput) ? usageOutput : await countTokensCached(record.responseText ?? "");
+    const usage = extractUsageTokens(record.usage);
+    const input = usage && usage.input !== null ? usage.input : await countMsgTokens(record.requestTexts);
+    const output = usage && usage.output !== null ? usage.output : await countTokensCached(record.responseText ?? "");
+    const cachedInput = usage?.cachedInput ?? 0;
+    const cacheWriteInput = usage?.cacheWriteInput ?? 0;
     const category = resolveCategory(record);
     const entry = appendRequest({
       kind: category,
@@ -944,6 +983,8 @@ async function handleIngest(record) {
       model: record.model,
       input: input ?? 0,
       output: output ?? 0,
+      cachedInput,
+      cacheWriteInput,
       ts: record.ts
     });
     await recordAuxUsage({
@@ -1088,10 +1129,14 @@ function setCatalogue(data, updatedAt) {
     if (!Number.isFinite(inputCost) && !Number.isFinite(outputCost)) {
       continue;
     }
+    const cacheReadCost = Number(value.cache_read_input_token_cost ?? value.input_cost_per_token_cache_hit);
+    const cacheWriteCost = Number(value.cache_creation_input_token_cost);
     const entry = {
       key,
       inputCost: Number.isFinite(inputCost) ? inputCost : 0,
-      outputCost: Number.isFinite(outputCost) ? outputCost : 0
+      outputCost: Number.isFinite(outputCost) ? outputCost : 0,
+      cacheReadCost: Number.isFinite(cacheReadCost) ? cacheReadCost : null,
+      cacheWriteCost: Number.isFinite(cacheWriteCost) ? cacheWriteCost : null
     };
     const lowerKey = key.toLowerCase();
     byKey.set(lowerKey, entry);
@@ -1201,12 +1246,23 @@ function resolvePrice(model) {
   }
   return { found: false };
 }
-function computeCost({ input, output, model, rate = 1 }) {
+function computeCost({ input, output, cachedInput = 0, cacheWriteInput = 0, model, rate = 1 }) {
   const price = resolvePrice(model);
   if (!price.found) {
     return { found: false, cost: null, usd: null, price };
   }
-  const usd = (Number(input) || 0) * price.inputCost + (Number(output) || 0) * price.outputCost;
+  const toCount = (value) => {
+    const num = Number(value);
+    return Number.isFinite(num) && num > 0 ? num : 0;
+  };
+  const totalInput = toCount(input);
+  const totalOutput = toCount(output);
+  const cached = toCount(cachedInput);
+  const written = toCount(cacheWriteInput);
+  const uncachedInput = totalInput >= cached + written ? totalInput - cached - written : totalInput;
+  const cacheReadCost = Number.isFinite(price.cacheReadCost) ? price.cacheReadCost : price.inputCost;
+  const cacheWriteCost = Number.isFinite(price.cacheWriteCost) ? price.cacheWriteCost : price.inputCost;
+  const usd = uncachedInput * price.inputCost + cached * cacheReadCost + written * cacheWriteCost + totalOutput * price.outputCost;
   return { found: true, cost: usd * (Number(rate) || 1), usd, price };
 }
 
@@ -1478,9 +1534,16 @@ function fallbackModelFor(kind, settings) {
 }
 function recordCost(entry, rate, settings) {
   const fallbackModel = fallbackModelFor(entry.kind, settings);
-  let result = computeCost({ input: entry.input ?? 0, output: entry.output ?? 0, model: entry.model, rate });
+  const usage = {
+    input: entry.input ?? 0,
+    output: entry.output ?? 0,
+    cachedInput: entry.cachedInput ?? 0,
+    cacheWriteInput: entry.cacheWriteInput ?? 0,
+    rate
+  };
+  let result = computeCost({ ...usage, model: entry.model });
   if (!result.found && fallbackModel) {
-    const fallback = computeCost({ input: entry.input ?? 0, output: entry.output ?? 0, model: fallbackModel, rate });
+    const fallback = computeCost({ ...usage, model: fallbackModel });
     if (fallback.found) {
       return { found: true, cost: fallback.cost, pricedAtFallback: true, fallbackModel };
     }
@@ -2100,31 +2163,33 @@ function deliverMainUsage({ usage, model } = {}) {
   if (!capture) {
     return;
   }
-  const promptTokens = Number(usage?.prompt_tokens);
-  const completionTokens = Number(usage?.completion_tokens);
-  const input = Number.isFinite(promptTokens) ? promptTokens : null;
-  const output = Number.isFinite(completionTokens) ? completionTokens : null;
-  if (input === null && output === null) {
+  const tokens = extractUsageTokens(usage);
+  if (!tokens || tokens.input === null && tokens.output === null) {
     return;
   }
   capture.usage = {
-    input,
-    output,
+    input: tokens.input,
+    output: tokens.output,
+    cachedInput: tokens.cachedInput,
+    cacheWriteInput: tokens.cacheWriteInput,
     model: typeof model === "string" ? model : ""
   };
   if (capture.entry) {
-    const fields = {};
-    if (input !== null) {
-      fields.input = input;
+    const fields = {
+      cachedInput: tokens.cachedInput,
+      cacheWriteInput: tokens.cacheWriteInput
+    };
+    if (tokens.input !== null) {
+      fields.input = tokens.input;
     }
-    if (output !== null) {
-      fields.output = output;
+    if (tokens.output !== null) {
+      fields.output = tokens.output;
     }
     patchRequest(capture.entry.id, fields);
     if (capture.message) {
       void updateMessageTokens(capture.message, {
-        input: input !== null ? input : void 0,
-        output: output !== null ? output : void 0
+        input: tokens.input !== null ? tokens.input : void 0,
+        output: tokens.output !== null ? tokens.output : void 0
       });
     }
     refreshPanel();
@@ -2145,6 +2210,8 @@ async function finalizeMainRequest({ text, model, message }, index) {
   const countedInput = await capture.counted;
   const usage = capture.usage;
   const input = usage?.input ?? countedInput ?? null;
+  const cachedInput = usage?.cachedInput ?? 0;
+  const cacheWriteInput = usage?.cacheWriteInput ?? 0;
   let output = usage?.output ?? null;
   if (message) {
     const data = await updateMessageTokens(message, {
@@ -2163,6 +2230,8 @@ async function finalizeMainRequest({ text, model, message }, index) {
     model: model || usage?.model || "",
     input,
     output,
+    cachedInput,
+    cacheWriteInput,
     ts: capture.ts
   });
   capture.entry = entry ?? null;

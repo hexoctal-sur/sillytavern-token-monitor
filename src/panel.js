@@ -171,10 +171,18 @@ function fallbackModelFor(kind, settings) {
 
 function recordCost(entry, rate, settings) {
     const fallbackModel = fallbackModelFor(entry.kind, settings);
-    let result = computeCost({ input: entry.input ?? 0, output: entry.output ?? 0, model: entry.model, rate });
+    const usage = {
+        input: entry.input ?? 0,
+        output: entry.output ?? 0,
+        cachedInput: entry.cachedInput ?? 0,
+        cacheWriteInput: entry.cacheWriteInput ?? 0,
+        rate,
+    };
+
+    let result = computeCost({ ...usage, model: entry.model });
 
     if (!result.found && fallbackModel) {
-        const fallback = computeCost({ input: entry.input ?? 0, output: entry.output ?? 0, model: fallbackModel, rate });
+        const fallback = computeCost({ ...usage, model: fallbackModel });
         if (fallback.found) {
             return { found: true, cost: fallback.cost, pricedAtFallback: true, fallbackModel };
         }

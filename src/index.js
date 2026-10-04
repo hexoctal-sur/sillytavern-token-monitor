@@ -12,7 +12,7 @@
  * Bundled to the repository-root `index.js` by esbuild.
  */
 
-import { initTokenTracking, takeGenerationType, isQuietType, countRequestTokens, countTextAsync } from './tokens.js';
+import { initTokenTracking, takeGenerationType, isQuietType, countRequestTokens, countTextAsync, extractUsageTokens } from './tokens.js';
 import { updateMessageTokens, updateChatSummary, clearAllTokenData, appendRequest, patchRequest } from './store.js';
 import { installAuxFetchInterceptor, uninstallAuxFetchInterceptor, rescanAuxFrames } from './interceptor.js';
 import { loadCached as loadPriceCatalogue } from './pricing.js';
@@ -97,33 +97,35 @@ function deliverMainUsage({ usage, model } = {}) {
         return;
     }
 
-    const promptTokens = Number(usage?.prompt_tokens);
-    const completionTokens = Number(usage?.completion_tokens);
-    const input = Number.isFinite(promptTokens) ? promptTokens : null;
-    const output = Number.isFinite(completionTokens) ? completionTokens : null;
-    if (input === null && output === null) {
+    const tokens = extractUsageTokens(usage);
+    if (!tokens || (tokens.input === null && tokens.output === null)) {
         return;
     }
 
     capture.usage = {
-        input,
-        output,
+        input: tokens.input,
+        output: tokens.output,
+        cachedInput: tokens.cachedInput,
+        cacheWriteInput: tokens.cacheWriteInput,
         model: typeof model === 'string' ? model : '',
     };
 
     if (capture.entry) {
-        const fields = {};
-        if (input !== null) {
-            fields.input = input;
+        const fields = {
+            cachedInput: tokens.cachedInput,
+            cacheWriteInput: tokens.cacheWriteInput,
+        };
+        if (tokens.input !== null) {
+            fields.input = tokens.input;
         }
-        if (output !== null) {
-            fields.output = output;
+        if (tokens.output !== null) {
+            fields.output = tokens.output;
         }
         patchRequest(capture.entry.id, fields);
         if (capture.message) {
             void updateMessageTokens(capture.message, {
-                input: input !== null ? input : undefined,
-                output: output !== null ? output : undefined,
+                input: tokens.input !== null ? tokens.input : undefined,
+                output: tokens.output !== null ? tokens.output : undefined,
             });
         }
         refreshPanel();
@@ -152,6 +154,8 @@ async function finalizeMainRequest({ text, model, message }, index) {
     const countedInput = await capture.counted;
     const usage = capture.usage;
     const input = usage?.input ?? countedInput ?? null;
+    const cachedInput = usage?.cachedInput ?? 0;
+    const cacheWriteInput = usage?.cacheWriteInput ?? 0;
 
     let output = usage?.output ?? null;
     if (message) {
@@ -172,6 +176,8 @@ async function finalizeMainRequest({ text, model, message }, index) {
         model: model || usage?.model || '',
         input,
         output,
+        cachedInput,
+        cacheWriteInput,
         ts: capture.ts,
     });
     capture.entry = entry ?? null;
