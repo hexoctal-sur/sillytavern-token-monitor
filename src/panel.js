@@ -5,7 +5,7 @@
  * floor stay visible) and the extension settings.
  */
 
-import { computeRequestSummary, listRequests, recomputeChat, clearChatTokenData } from './store.js';
+import { listRequests, recomputeChat, clearChatTokenData } from './store.js';
 import { setMarkerConfig, rescanAuxFrames } from './interceptor.js';
 import { getPriceMeta, updatePrices, computeCost } from './pricing.js';
 import { attachModelCombo } from './combo.js';
@@ -16,8 +16,13 @@ const MENU_ID = 'token_monitor_menu_entry';
 const FAB_ID = 'token_monitor_fab';
 const MARKER_STORAGE_KEY = 'token_monitor_markers';
 
-const AUX_LABELS = { plot: '剧情推进', fill: '填表', other: '其他' };
-const KIND_SHORT = { main: '主', plot: '剧情', fill: '填表', other: '其他' };
+const KIND_META = {
+    main: { label: '主生成', emoji: '🎯', short: '主' },
+    plot: { label: '剧情推进', emoji: '📖', short: '剧情' },
+    fill: { label: '填表', emoji: '📋', short: '填表' },
+    other: { label: '其他', emoji: '🧩', short: '其他' },
+};
+const KIND_ORDER = ['main', 'plot', 'fill', 'other'];
 
 const CLEAR_PHRASE = '清空';
 
@@ -146,13 +151,6 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
-function setText(id, text) {
-    const element = document.getElementById(id);
-    if (element) {
-        element.textContent = text;
-    }
-}
-
 /* ------------------------------------------------------------------ *
  * Cost helpers
  *
@@ -270,65 +268,59 @@ function buildPanelSkeleton() {
     panel.classList.add('tm-hidden');
     panel.innerHTML = `
         <div class="tm-header">
-            <span class="tm-title">Token 统计</span>
+            <span class="tm-title">📊 Token 统计</span>
             <span class="tm-header-actions">
+                <span class="tm-icon tm-gear" id="tm-settings-toggle" title="设置">⚙️</span>
                 <span class="tm-icon tm-collapse fa-solid fa-chevron-down" title="折叠/展开"></span>
                 <span class="tm-icon tm-close fa-solid fa-xmark" title="隐藏"></span>
             </span>
         </div>
         <div class="tm-body">
-            <div class="tm-main">
-                <div class="tm-row"><span class="tm-label">主生成 <span class="tm-calls" id="tm-main-calls"></span></span><span class="tm-value" id="tm-main-cost">—</span></div>
-                <div class="tm-sub">
-                    <span id="tm-main-in">in —</span>
-                    <span id="tm-main-out">out —</span>
-                    <span id="tm-main-total">total —</span>
-                </div>
-                <div class="tm-hint" id="tm-main-model"></div>
-            </div>
-            <div class="tm-aux" id="tm-aux"></div>
+            <div class="tm-total" id="tm-total"></div>
+            <div class="tm-cats" id="tm-cats"></div>
             <div class="tm-list">
-                <div class="tm-requests-title">请求流水</div>
+                <div class="tm-list-title">📋 请求流水</div>
                 <div class="tm-requests" id="tm-requests"></div>
             </div>
-            <div class="tm-settings">
-                <div class="tm-settings-head" id="tm-settings-toggle">
-                    <span>设置</span>
-                    <span class="tm-icon fa-solid fa-chevron-down"></span>
-                </div>
-                <div class="tm-settings-body tm-hidden" id="tm-settings-body">
-                    <label class="tm-field">主生成模型
-                        <input id="tm-set-model" class="text_pole" type="text" placeholder="留空则自动读取当前模型">
-                    </label>
-                    <label class="tm-field">剧情推进模型
-                        <input id="tm-set-plot-model" class="text_pole" type="text" placeholder="留空则用拦截到的模型名">
-                    </label>
-                    <label class="tm-field">填表模型（含其他）
-                        <input id="tm-set-fill-model" class="text_pole" type="text" placeholder="留空则用拦截到的模型名">
-                    </label>
-                    <label class="tm-field">汇率（rate=1 时按美元直显）
-                        <input id="tm-set-rate" class="text_pole" type="number" min="0" step="0.01">
-                    </label>
-                    <label class="tm-field">分类模式
-                        <select id="tm-set-mode" class="text_pole">
-                            <option value="auto">自动（窗口 + 标记）</option>
-                            <option value="markers-only">仅标记</option>
-                        </select>
-                    </label>
-                    <label class="tm-field">剧情推进标记（逗号或换行分隔）
-                        <textarea id="tm-set-plot-markers" class="text_pole" rows="2"></textarea>
-                    </label>
-                    <label class="tm-field">填表标记（逗号或换行分隔）
-                        <textarea id="tm-set-fill-markers" class="text_pole" rows="2"></textarea>
-                    </label>
-                    <div class="tm-price-status" id="tm-price-status">未加载价格库</div>
-                    <div class="tm-actions">
-                        <div id="tm-save-settings" class="menu_button">保存设置</div>
-                        <div id="tm-update-prices" class="menu_button">更新价格库</div>
-                        <div id="tm-recount" class="menu_button">重新统计</div>
-                        <div id="tm-refresh" class="menu_button">刷新</div>
-                        <div id="tm-clear" class="menu_button">清空本聊天</div>
-                    </div>
+        </div>
+        <div class="tm-settings-page tm-hidden" id="tm-settings-page">
+            <div class="tm-settings-head">
+                <span class="tm-settings-title">⚙️ 设置</span>
+                <span class="tm-icon tm-settings-close fa-solid fa-xmark" title="返回主页面"></span>
+            </div>
+            <div class="tm-settings-body" id="tm-settings-body">
+                <div class="tm-settings-note">✏️ 修改后点击「保存设置」才会生效，并按新配置重算全部费用</div>
+                <label class="tm-field">🎯 主生成模型
+                    <input id="tm-set-model" class="text_pole" type="text" placeholder="留空则用拦截到的模型名">
+                </label>
+                <label class="tm-field">📖 剧情推进模型
+                    <input id="tm-set-plot-model" class="text_pole" type="text" placeholder="留空则用拦截到的模型名">
+                </label>
+                <label class="tm-field">📋 填表模型（含其他）
+                    <input id="tm-set-fill-model" class="text_pole" type="text" placeholder="留空则用拦截到的模型名">
+                </label>
+                <label class="tm-field">💱 汇率（1 = 美元直显）
+                    <input id="tm-set-rate" class="text_pole" type="number" min="0" step="0.01">
+                </label>
+                <label class="tm-field">🗂 分类模式
+                    <select id="tm-set-mode" class="text_pole">
+                        <option value="auto">自动（窗口 + 标记）</option>
+                        <option value="markers-only">仅标记</option>
+                    </select>
+                </label>
+                <label class="tm-field">📖 剧情推进标记（逗号或换行分隔）
+                    <textarea id="tm-set-plot-markers" class="text_pole" rows="2"></textarea>
+                </label>
+                <label class="tm-field">📋 填表标记（逗号或换行分隔）
+                    <textarea id="tm-set-fill-markers" class="text_pole" rows="2"></textarea>
+                </label>
+                <div class="tm-price-status" id="tm-price-status">未加载价格库</div>
+                <div class="tm-actions">
+                    <div id="tm-save-settings" class="menu_button">💾 保存设置</div>
+                    <div id="tm-update-prices" class="menu_button">🔄 更新价格库</div>
+                    <div id="tm-recount" class="menu_button">🧮 重新统计</div>
+                    <div id="tm-refresh" class="menu_button">🔃 刷新</div>
+                    <div id="tm-clear" class="menu_button tm-danger">🗑 清空本聊天</div>
                 </div>
             </div>
         </div>
@@ -347,9 +339,14 @@ function bindPanelEvents(panel) {
 
     panel.querySelector('.tm-close').addEventListener('click', () => setPanelVisible(false));
 
+    const settingsPage = document.getElementById('tm-settings-page');
+    const toggleSettings = (open) => {
+        settingsPage.classList.toggle('tm-hidden', !open);
+    };
     document.getElementById('tm-settings-toggle').addEventListener('click', () => {
-        document.getElementById('tm-settings-body').classList.toggle('tm-hidden');
+        toggleSettings(settingsPage.classList.contains('tm-hidden'));
     });
+    panel.querySelector('.tm-settings-close').addEventListener('click', () => toggleSettings(false));
 
     bindDrag(panel);
     bindResize(panel);
@@ -652,13 +649,85 @@ function formatRequestTime(ts) {
     return date.toLocaleTimeString([], { hour12: false });
 }
 
+function sumTokens(entries) {
+    const totals = { calls: 0, input: 0, output: 0, cached: 0, cacheWrite: 0 };
+    for (const entry of entries) {
+        totals.calls += 1;
+        totals.input += entry.input ?? 0;
+        totals.output += entry.output ?? 0;
+        totals.cached += entry.cachedInput ?? 0;
+        totals.cacheWrite += entry.cacheWriteInput ?? 0;
+    }
+    return totals;
+}
+
+function formatCacheRate(cached, input) {
+    const total = Number(input);
+    const hit = Number(cached);
+    if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(hit)) {
+        return '—';
+    }
+    return `${Math.min(100, (hit / total) * 100).toFixed(1)}%`;
+}
+
+function metricsHtml(totals) {
+    return `
+        <span class="tm-metric">⬇️ <b>${formatNumber(totals.input)}</b></span>
+        <span class="tm-metric">⬆️ <b>${formatNumber(totals.output)}</b></span>
+        <span class="tm-metric">💾 <b>${formatNumber(totals.cached)}</b></span>
+        <span class="tm-metric">📈 <b>${formatCacheRate(totals.cached, totals.input)}</b></span>`;
+}
+
+/** 合计区：主生成 + 剧情推进 + 填表 + 其他的总和。 */
+function renderTotal(entries, rate, settings) {
+    const container = document.getElementById('tm-total');
+    if (!container) {
+        return;
+    }
+
+    const totals = sumTokens(entries);
+    const priced = sumRecordsCost(entries, rate, settings);
+    const costText = priced.cost === null ? '—' : formatCost(priced.cost, rate);
+
+    container.innerHTML = `
+        <div class="tm-total-card">
+            <div class="tm-total-row">
+                <span class="tm-total-label">💰 总花费</span>
+                <span class="tm-total-cost">${costText}</span>
+            </div>
+            <div class="tm-total-sub">📦 总请求 <b>${totals.calls}</b> 次 · 🧮 总计 <b>${formatNumber(totals.input + totals.output)}</b> tokens</div>
+            <div class="tm-metrics">${metricsHtml(totals)}</div>
+        </div>`;
+}
+
+/** 分类区：各类的总和（不展示模型）。 */
+function renderCategories(entries, rate, settings) {
+    const container = document.getElementById('tm-cats');
+    if (!container) {
+        return;
+    }
+
+    container.innerHTML = KIND_ORDER.map(kind => {
+        const own = entries.filter(entry => entry.kind === kind);
+        const totals = sumTokens(own);
+        const priced = sumRecordsCost(own, rate, settings);
+        const costText = priced.cost === null ? '—' : formatCost(priced.cost, rate);
+        const meta = KIND_META[kind];
+        return `
+            <div class="tm-cat-card">
+                <div class="tm-cat-head">
+                    <span class="tm-cat-name">${meta.emoji} ${meta.label}</span>
+                    <span class="tm-cat-cost">${costText}</span>
+                </div>
+                <div class="tm-cat-sub">📦 ${totals.calls} 次</div>
+                <div class="tm-metrics tm-metrics-mini">${metricsHtml(totals)}</div>
+            </div>`;
+    }).join('');
+}
+
 /**
- * Per-request list: one 2×3 table block per AI request, appended in request
- * order — main generations (including every re-generation of a floor), plot
- * progression, table filling and other auxiliary calls.
- *
- *   | 类型 / 楼层 | 出 token | 模型   |
- *   | 时间        | 入 token | 费用   |
+ * 明细区：每条 AI 请求一张卡片（含同一楼层的每次重新生成），按请求顺序追加：
+ * 类型 / 楼层、时间、输入、输出、缓存命中、命中率、模型、成本。
  */
 function renderRequests() {
     const container = document.getElementById('tm-requests');
@@ -671,13 +740,14 @@ function renderRequests() {
     const entries = listRequests();
 
     if (entries.length === 0) {
-        container.innerHTML = '<div class="tm-empty">本聊天暂无请求记录</div>';
+        container.innerHTML = '<div class="tm-empty">✨ 本聊天暂无请求记录</div>';
         return;
     }
 
     const regenCounter = new Map();
     const rows = entries.map(entry => {
-        const kind = entry.kind in KIND_SHORT ? entry.kind : 'other';
+        const kind = entry.kind in KIND_META ? entry.kind : 'other';
+        const meta = KIND_META[kind];
         const floorKnown = Number.isInteger(entry.floor);
         let regen = '';
         if (kind === 'main' && floorKnown) {
@@ -689,9 +759,7 @@ function renderRequests() {
         }
 
         const priced = recordCost(entry, rate, settings);
-        const costText = priced.found
-            ? `${formatCost(priced.cost, rate)}${priced.source === 'captured' ? '' : '*'}`
-            : '—';
+        const costText = priced.found ? formatCost(priced.cost, rate) : '—';
         const costTitle = !priced.found
             ? '未能在价格库中匹配到模型，无法计价'
             : (priced.source === 'captured'
@@ -700,15 +768,25 @@ function renderRequests() {
 
         const floorText = floorKnown ? `${entry.floor}楼` : '未归层';
         const modelText = entry.model || '—';
+        const input = entry.input ?? 0;
+        const cached = entry.cachedInput ?? 0;
 
         return `
             <div class="tm-request" data-floor="${floorKnown ? entry.floor : ''}">
-                <span class="tm-request-type"><span class="tm-badge tm-badge-${kind}" title="${AUX_LABELS[kind] ?? '主生成'}">${KIND_SHORT[kind]}</span><span class="tm-request-floor">${floorText}${regen}</span></span>
-                <span class="tm-request-out">出 ${entry.output === null ? '—' : formatNumber(entry.output)}</span>
-                <span class="tm-request-model" title="${escapeHtml(modelText)}">${escapeHtml(modelText)}</span>
-                <span class="tm-request-time">${formatRequestTime(entry.ts)}</span>
-                <span class="tm-request-in">入 ${entry.input === null ? '—' : formatNumber(entry.input)}</span>
-                <span class="tm-request-cost" title="${escapeHtml(costTitle)}">${costText}</span>
+                <div class="tm-request-head">
+                    <span class="tm-request-kind"><span class="tm-badge tm-badge-${kind}">${meta.emoji} ${meta.short}</span><span class="tm-request-floor">📍 ${floorText}${regen}</span></span>
+                    <span class="tm-request-time">🕐 ${formatRequestTime(entry.ts)}</span>
+                </div>
+                <div class="tm-metrics tm-request-metrics">
+                    <span class="tm-metric">⬇️ <b>${entry.input === null ? '—' : formatNumber(entry.input)}</b></span>
+                    <span class="tm-metric">⬆️ <b>${entry.output === null ? '—' : formatNumber(entry.output)}</b></span>
+                    <span class="tm-metric">💾 <b>${formatNumber(cached)}</b></span>
+                    <span class="tm-metric">📈 <b>${formatCacheRate(cached, input)}</b></span>
+                </div>
+                <div class="tm-request-foot">
+                    <span class="tm-request-model" title="${escapeHtml(modelText)}">🤖 ${escapeHtml(modelText)}</span>
+                    <span class="tm-request-cost" title="${escapeHtml(costTitle)}">💲 ${costText}</span>
+                </div>
             </div>`;
     });
 
@@ -725,31 +803,6 @@ function renderRequests() {
     });
 }
 
-function renderAux(entries, rate, settings) {
-    const container = document.getElementById('tm-aux');
-    if (!container) {
-        return;
-    }
-
-    container.innerHTML = Object.keys(AUX_LABELS).map(category => {
-        const own = entries.filter(entry => entry.kind === category);
-        const input = own.reduce((sum, entry) => sum + (entry.input ?? 0), 0);
-        const output = own.reduce((sum, entry) => sum + (entry.output ?? 0), 0);
-        const priced = sumRecordsCost(own, rate, settings);
-        const costText = priced.cost === null
-            ? '—'
-            : `${formatCost(priced.cost, rate)}${priced.unknown || priced.fallback ? '*' : ''}`;
-        const modelNote = priced.fallback
-            ? ` <i>按 ${escapeHtml(priced.fallbackModel)} 计价</i>`
-            : '';
-        return `
-            <div class="tm-row tm-aux-row">
-                <span class="tm-label">${AUX_LABELS[category]}</span>
-                <span class="tm-aux-metrics">${own.length}次 · in ${formatNumber(input)} · out ${formatNumber(output)} · <b>${costText}</b>${modelNote}</span>
-            </div>`;
-    }).join('');
-}
-
 export function refreshPanel() {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) {
@@ -758,24 +811,10 @@ export function refreshPanel() {
 
     const settings = getSettings();
     const rate = Number(settings.rate) || 1;
-    const summary = computeRequestSummary();
     const entries = listRequests();
 
-    const model = settings.mainGenModel || detectCurrentModel();
-    const mainEntries = entries.filter(entry => entry.kind === 'main');
-    const mainPriced = sumRecordsCost(mainEntries, rate, settings);
-    const mainCostText = mainPriced.cost === null
-        ? '—'
-        : `${formatCost(mainPriced.cost, rate)}${mainPriced.unknown || mainPriced.fallback ? '*' : ''}`;
-
-    setText('tm-main-calls', `${summary.main.calls}次`);
-    setText('tm-main-in', `in ${formatNumber(summary.main.input)}${summary.main.unknownInput ? '*' : ''}`);
-    setText('tm-main-out', `out ${formatNumber(summary.main.output)}`);
-    setText('tm-main-total', `total ${formatNumber(summary.main.input + summary.main.output)}`);
-    setText('tm-main-cost', mainCostText);
-    setText('tm-main-model', model ? `模型：${model}` : '未设置模型（不计算主生成成本）');
-
-    renderAux(entries, rate, settings);
+    renderTotal(entries, rate, settings);
+    renderCategories(entries, rate, settings);
     renderRequests();
     updatePriceStatus();
 }
