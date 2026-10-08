@@ -1434,6 +1434,9 @@ var KIND_META = {
 };
 var KIND_ORDER = ["main", "plot", "fill", "other"];
 var CLEAR_PHRASE = "清空";
+var DEFAULT_FONT_COLOR = "#eaeaea";
+var DEFAULT_BG_COLOR = "#20233a";
+var DEFAULT_BG_OPACITY = 82;
 var defaultSettings = Object.freeze({
   mainGenModel: "",
   plotModel: "",
@@ -1443,7 +1446,12 @@ var defaultSettings = Object.freeze({
   panelVisible: false,
   panelPosition: null,
   panelSize: null,
-  collapsed: false
+  collapsed: false,
+  activeTab: "requests",
+  requestFilter: null,
+  fontColor: DEFAULT_FONT_COLOR,
+  bgColor: DEFAULT_BG_COLOR,
+  bgOpacity: DEFAULT_BG_OPACITY
 });
 var AUX_MODEL_SETTINGS = { plot: "plotModel", fill: "fillModel", other: "fillModel" };
 var bound = false;
@@ -1527,6 +1535,38 @@ function formatCost(value, rate) {
 }
 function escapeHtml2(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function normalizeHexColor(value) {
+  const raw = String(value ?? "").trim().replace(/^#/, "");
+  if (/^[0-9a-fA-F]{3}$/.test(raw)) {
+    return `#${raw.split("").map((ch) => ch + ch).join("")}`.toLowerCase();
+  }
+  if (/^[0-9a-fA-F]{6}$/.test(raw)) {
+    return `#${raw.toLowerCase()}`;
+  }
+  return "";
+}
+function hexToRgb(hex) {
+  const normalized = normalizeHexColor(hex);
+  if (!normalized) {
+    return null;
+  }
+  const value = parseInt(normalized.slice(1), 16);
+  return { r: value >> 16 & 255, g: value >> 8 & 255, b: value & 255 };
+}
+function applyThemeValues(panel, { fontColor, bgColor, bgOpacity }) {
+  if (!panel) {
+    return;
+  }
+  const font = normalizeHexColor(fontColor) || DEFAULT_FONT_COLOR;
+  const bg = hexToRgb(bgColor) || hexToRgb(DEFAULT_BG_COLOR);
+  const opacity = clampSize(Number(bgOpacity ?? DEFAULT_BG_OPACITY), 0, 100) / 100;
+  panel.style.setProperty("--tm-font", font);
+  panel.style.setProperty("--tm-bg-rgb", `${bg.r}, ${bg.g}, ${bg.b}`);
+  panel.style.setProperty("--tm-bg-alpha", String(opacity));
+}
+function applyPanelTheme(panel = document.getElementById(PANEL_ID)) {
+  applyThemeValues(panel, getSettings());
 }
 function configuredModelFor(kind, settings) {
   if (kind === "main") {
@@ -1622,10 +1662,17 @@ function buildPanelSkeleton() {
         </div>
         <div class="tm-body">
             <div class="tm-total" id="tm-total"></div>
-            <div class="tm-cats" id="tm-cats"></div>
-            <div class="tm-list">
-                <div class="tm-list-title">📋 请求流水</div>
+            <div class="tm-tabbar" id="tm-tabbar">
+                <button type="button" class="tm-tab" data-tab="requests">📋 流水</button>
+                <button type="button" class="tm-tab" data-tab="summary">📊 分类</button>
+            </div>
+            <div class="tm-pane tm-pane-requests" id="tm-pane-requests">
+                <div class="tm-filters" id="tm-filters"></div>
+                <div class="tm-filter-status tm-hidden" id="tm-filter-status"></div>
                 <div class="tm-requests" id="tm-requests"></div>
+            </div>
+            <div class="tm-pane tm-pane-summary tm-hidden" id="tm-pane-summary">
+                <div class="tm-cats" id="tm-cats"></div>
             </div>
         </div>
         <div class="tm-settings-page tm-hidden" id="tm-settings-page">
@@ -1659,6 +1706,23 @@ function buildPanelSkeleton() {
                 <label class="tm-field">📋 填表标记（逗号或换行分隔）
                     <textarea id="tm-set-fill-markers" class="text_pole" rows="2"></textarea>
                 </label>
+                <div class="tm-settings-section">🎨 外观</div>
+                <label class="tm-field">字体颜色（Hex）
+                    <span class="tm-color-row">
+                        <input id="tm-set-font-color" class="text_pole" type="text" placeholder="#eaeaea" maxlength="7" spellcheck="false">
+                        <span class="tm-color-swatch" id="tm-font-swatch"></span>
+                    </span>
+                </label>
+                <label class="tm-field">背景颜色（Hex）
+                    <span class="tm-color-row">
+                        <input id="tm-set-bg-color" class="text_pole" type="text" placeholder="#20233a" maxlength="7" spellcheck="false">
+                        <span class="tm-color-swatch" id="tm-bg-swatch"></span>
+                    </span>
+                </label>
+                <label class="tm-field">
+                    <span class="tm-field-label">窗口透明度 <span class="tm-opacity-value" id="tm-opacity-value">82%</span></span>
+                    <input id="tm-set-opacity" class="tm-range" type="range" min="0" max="100" step="1">
+                </label>
                 <div class="tm-price-status" id="tm-price-status">未加载价格库</div>
                 <div class="tm-actions">
                     <div id="tm-save-settings" class="menu_button">💾 保存设置</div>
@@ -1684,14 +1748,63 @@ function bindPanelEvents(panel) {
   const settingsPage = document.getElementById("tm-settings-page");
   const toggleSettings = (open) => {
     settingsPage.classList.toggle("tm-hidden", !open);
+    if (!open) {
+      applyPanelTheme(panel);
+    }
   };
   document.getElementById("tm-settings-toggle").addEventListener("click", () => {
     toggleSettings(settingsPage.classList.contains("tm-hidden"));
   });
   panel.querySelector(".tm-settings-close").addEventListener("click", () => toggleSettings(false));
+  bindTabbar(panel);
+  bindFilters(panel);
+  setActiveTab(panel, getSettings().activeTab, { persist: false });
+  applyPanelTheme(panel);
   bindDrag(panel);
   bindResize(panel);
   bindSettingsInputs();
+}
+function setActiveTab(panel, tab, { persist = true } = {}) {
+  const valid = tab === "summary" ? "summary" : "requests";
+  panel.querySelectorAll(".tm-tab").forEach((button) => {
+    button.classList.toggle("tm-active", button.dataset.tab === valid);
+  });
+  document.getElementById("tm-pane-requests")?.classList.toggle("tm-hidden", valid !== "requests");
+  document.getElementById("tm-pane-summary")?.classList.toggle("tm-hidden", valid !== "summary");
+  if (persist) {
+    const settings = getSettings();
+    settings.activeTab = valid;
+    saveSettings();
+  }
+}
+function bindTabbar(panel) {
+  panel.querySelectorAll(".tm-tab").forEach((button) => {
+    button.addEventListener("click", () => setActiveTab(panel, button.dataset.tab));
+  });
+}
+function bindFilters(panel) {
+  const body = panel.querySelector(".tm-body");
+  body?.addEventListener("click", (event) => {
+    const settings = getSettings();
+    const chip = event.target.closest(".tm-filter-chip");
+    if (chip) {
+      const kind = chip.dataset.kind;
+      if (!kind || kind === "all") {
+        settings.requestFilter = null;
+      } else {
+        settings.requestFilter = settings.requestFilter === kind ? null : kind;
+      }
+      saveSettings();
+      refreshPanel();
+      setActiveTab(panel, "requests");
+      return;
+    }
+    if (event.target.closest(".tm-filter-clear")) {
+      settings.requestFilter = null;
+      saveSettings();
+      refreshPanel();
+    }
+  });
 }
 function bindDrag(panel) {
   const header = panel.querySelector(".tm-header");
@@ -1804,6 +1917,12 @@ function bindSettingsInputs() {
   const modeSelect = document.getElementById("tm-set-mode");
   const plotMarkers = document.getElementById("tm-set-plot-markers");
   const fillMarkers = document.getElementById("tm-set-fill-markers");
+  const fontColorInput = document.getElementById("tm-set-font-color");
+  const bgColorInput = document.getElementById("tm-set-bg-color");
+  const opacityInput = document.getElementById("tm-set-opacity");
+  const fontSwatch = document.getElementById("tm-font-swatch");
+  const bgSwatch = document.getElementById("tm-bg-swatch");
+  const opacityValue = document.getElementById("tm-opacity-value");
   modelInput.value = settings.mainGenModel ?? "";
   plotModelInput.value = settings.plotModel ?? "";
   fillModelInput.value = settings.fillModel ?? "";
@@ -1811,6 +1930,29 @@ function bindSettingsInputs() {
   modeSelect.value = settings.classifyMode ?? "auto";
   plotMarkers.value = markers.plotMarkers.join("\n");
   fillMarkers.value = markers.fillMarkers.join("\n");
+  fontColorInput.value = normalizeHexColor(settings.fontColor) || DEFAULT_FONT_COLOR;
+  bgColorInput.value = normalizeHexColor(settings.bgColor) || DEFAULT_BG_COLOR;
+  opacityInput.value = String(clampSize(Number(settings.bgOpacity ?? DEFAULT_BG_OPACITY), 0, 100));
+  opacityValue.textContent = `${opacityInput.value}%`;
+  fontSwatch.style.background = fontColorInput.value;
+  bgSwatch.style.background = bgColorInput.value;
+  const previewTheme = () => {
+    const font = normalizeHexColor(fontColorInput.value) || DEFAULT_FONT_COLOR;
+    const bg = normalizeHexColor(bgColorInput.value) || DEFAULT_BG_COLOR;
+    fontColorInput.value = font;
+    bgColorInput.value = bg;
+    fontSwatch.style.background = font;
+    bgSwatch.style.background = bg;
+    opacityValue.textContent = `${opacityInput.value}%`;
+    applyThemeValues(document.getElementById(PANEL_ID), {
+      fontColor: font,
+      bgColor: bg,
+      bgOpacity: Number(opacityInput.value)
+    });
+  };
+  fontColorInput.addEventListener("input", previewTheme);
+  bgColorInput.addEventListener("input", previewTheme);
+  opacityInput.addEventListener("input", previewTheme);
   combos = [modelInput, plotModelInput, fillModelInput].map((input) => attachModelCombo(input));
   document.getElementById("tm-save-settings").addEventListener("click", handleSaveSettings);
   document.getElementById("tm-update-prices").addEventListener("click", handleUpdatePrices);
@@ -1891,12 +2033,16 @@ function handleSaveSettings() {
   current.fillModel = document.getElementById("tm-set-fill-model").value.trim();
   current.rate = Number(document.getElementById("tm-set-rate").value) || 1;
   current.classifyMode = document.getElementById("tm-set-mode").value === "markers-only" ? "markers-only" : "auto";
+  current.fontColor = normalizeHexColor(document.getElementById("tm-set-font-color").value) || DEFAULT_FONT_COLOR;
+  current.bgColor = normalizeHexColor(document.getElementById("tm-set-bg-color").value) || DEFAULT_BG_COLOR;
+  current.bgOpacity = clampSize(Number(document.getElementById("tm-set-opacity").value), 0, 100);
   saveSettings();
   saveMarkers({
     plotMarkers: parseMarkers(document.getElementById("tm-set-plot-markers").value),
     fillMarkers: parseMarkers(document.getElementById("tm-set-fill-markers").value)
   });
   applyClassification();
+  applyPanelTheme();
   refreshPanel();
   if (typeof toastr !== "undefined") {
     toastr.success("设置已保存，费用已按当前配置重新计算");
@@ -1976,12 +2122,10 @@ function renderTotal(entries, rate, settings) {
   const costText = priced.cost === null ? "—" : formatCost(priced.cost, rate);
   container.innerHTML = `
         <div class="tm-total-card">
-            <div class="tm-total-row">
-                <span class="tm-total-label">💰 总花费</span>
-                <span class="tm-total-cost">${costText}</span>
-            </div>
-            <div class="tm-total-sub">📦 总请求 <b>${totals.calls}</b> 次 · 🧮 总计 <b>${formatNumber(totals.input + totals.output)}</b> tokens</div>
-            <div class="tm-metrics">${metricsHtml(totals)}</div>
+            <span class="tm-total-cost">💰 ${costText}</span>
+            <span class="tm-total-calls">📦 <b>${totals.calls}</b> 次</span>
+            <span class="tm-total-tokens">🧮 <b>${formatNumber(totals.input + totals.output)}</b> tokens</span>
+            <span class="tm-metrics tm-total-metrics">${metricsHtml(totals)}</span>
         </div>`;
 }
 function renderCategories(entries, rate, settings) {
@@ -2006,6 +2150,43 @@ function renderCategories(entries, rate, settings) {
             </div>`;
   }).join("");
 }
+function renderFilters(entries, settings) {
+  const container = document.getElementById("tm-filters");
+  if (!container) {
+    return;
+  }
+  const counts = { all: entries.length };
+  for (const kind of KIND_ORDER) {
+    counts[kind] = 0;
+  }
+  for (const entry of entries) {
+    const kind = entry.kind in KIND_META ? entry.kind : "other";
+    counts[kind] += 1;
+  }
+  const chip = (kind, emoji, label, count) => {
+    const isActive = kind === "all" ? !settings.requestFilter : settings.requestFilter === kind;
+    const check = isActive && kind !== "all" ? '<span class="tm-filter-check">✓</span>' : "";
+    return `<button type="button" class="tm-filter-chip${isActive ? " tm-active" : ""}" data-kind="${kind}"><span class="tm-filter-label">${emoji} ${label}</span><span class="tm-filter-count">${count}</span>${check}</button>`;
+  };
+  container.innerHTML = [
+    chip("all", "🗂", "全部", counts.all),
+    ...KIND_ORDER.map((kind) => chip(kind, KIND_META[kind].emoji, KIND_META[kind].short, counts[kind]))
+  ].join("");
+}
+function updateFilterStatus(filter, count) {
+  const element = document.getElementById("tm-filter-status");
+  if (!element) {
+    return;
+  }
+  if (!filter || !(filter in KIND_META)) {
+    element.classList.add("tm-hidden");
+    element.innerHTML = "";
+    return;
+  }
+  const meta2 = KIND_META[filter];
+  element.classList.remove("tm-hidden");
+  element.innerHTML = `<span class="tm-filter-status-text">🔍 已筛选：${meta2.emoji} ${meta2.label}（${count} 条）</span><button type="button" class="tm-filter-clear" title="清除筛选">✕ 清除</button>`;
+}
 function renderRequests() {
   const container = document.getElementById("tm-requests");
   if (!container) {
@@ -2013,9 +2194,12 @@ function renderRequests() {
   }
   const settings = getSettings();
   const rate = Number(settings.rate) || 1;
-  const entries = listRequests();
+  const filter = settings.requestFilter;
+  const all = listRequests();
+  const entries = filter ? all.filter((entry) => (entry.kind in KIND_META ? entry.kind : "other") === filter) : all;
+  updateFilterStatus(filter, entries.length);
   if (entries.length === 0) {
-    container.innerHTML = '<div class="tm-empty">✨ 本聊天暂无请求记录</div>';
+    container.innerHTML = `<div class="tm-empty">${filter ? "🔍 该分类暂无请求记录" : "✨ 本聊天暂无请求记录"}</div>`;
     return;
   }
   const regenCounter = /* @__PURE__ */ new Map();
@@ -2055,7 +2239,7 @@ function renderRequests() {
                     <span class="tm-request-cost" title="${escapeHtml2(costTitle)}">💲 ${costText}</span>
                 </div>
             </div>`;
-  });
+  }).reverse();
   container.innerHTML = rows.join("");
   container.querySelectorAll(".tm-request").forEach((row) => {
     const floor = row.getAttribute("data-floor");
@@ -2078,6 +2262,7 @@ function refreshPanel() {
   const entries = listRequests();
   renderTotal(entries, rate, settings);
   renderCategories(entries, rate, settings);
+  renderFilters(entries, settings);
   renderRequests();
   updatePriceStatus();
 }

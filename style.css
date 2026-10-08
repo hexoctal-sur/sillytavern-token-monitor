@@ -19,7 +19,7 @@
     border-radius: 16px;
     cursor: pointer;
     background: linear-gradient(145deg, rgba(122, 140, 255, 0.42), rgba(20, 22, 40, 0.92));
-    color: var(--SmartThemeBodyColor, #eaeaea);
+    color: #eaeaea;
     border: 1px solid rgba(150, 165, 255, 0.4);
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 4px 18px rgba(110, 130, 255, 0.35);
     backdrop-filter: blur(14px);
@@ -34,6 +34,11 @@
 /* ---------- panel shell ---------- */
 
 #token_monitor_panel {
+    /* overridden at runtime by applyPanelTheme() */
+    --tm-font: #eaeaea;
+    --tm-bg-rgb: 32, 34, 56;
+    --tm-bg-alpha: 0.82;
+
     position: fixed;
     right: 20px;
     bottom: 20px;
@@ -41,10 +46,13 @@
     max-height: 72vh;
     display: flex;
     flex-direction: column;
-    background: linear-gradient(165deg, rgba(32, 34, 56, 0.82), rgba(16, 18, 32, 0.88));
+    background:
+        linear-gradient(165deg,
+            rgba(var(--tm-bg-rgb), var(--tm-bg-alpha)),
+            rgba(var(--tm-bg-rgb), min(1, calc(var(--tm-bg-alpha) + 0.08))));
     backdrop-filter: blur(24px) saturate(1.35);
     -webkit-backdrop-filter: blur(24px) saturate(1.35);
-    color: var(--SmartThemeBodyColor, #eaeaea);
+    color: var(--tm-font, #eaeaea);
     border: 1px solid rgba(255, 255, 255, 0.16);
     border-radius: 20px;
     box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.12);
@@ -146,39 +154,33 @@
 }
 
 #token_monitor_panel .tm-total-card {
-    border-radius: 16px;
-    padding: 12px 14px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 14px;
+    border-radius: 14px;
+    padding: 8px 12px;
     background: linear-gradient(135deg, rgba(122, 140, 255, 0.3), rgba(88, 70, 220, 0.16) 55%, rgba(255, 255, 255, 0.05));
     border: 1px solid rgba(150, 165, 255, 0.38);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 8px 24px rgba(60, 70, 160, 0.22);
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-}
-
-#token_monitor_panel .tm-total-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 10px;
-}
-
-#token_monitor_panel .tm-total-label {
-    opacity: 0.92;
-    font-size: 13px;
-    font-weight: 600;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 6px 18px rgba(60, 70, 160, 0.22);
+    font-variant-numeric: tabular-nums;
+    flex: 0 0 auto;
 }
 
 #token_monitor_panel .tm-total-cost {
-    font-size: 21px;
+    font-size: 18px;
     font-weight: 700;
-    font-variant-numeric: tabular-nums;
     letter-spacing: 0.2px;
 }
 
-#token_monitor_panel .tm-total-sub {
-    opacity: 0.75;
-    font-size: 11px;
+#token_monitor_panel .tm-total-calls,
+#token_monitor_panel .tm-total-tokens {
+    font-size: 12px;
+    opacity: 0.92;
+}
+
+#token_monitor_panel .tm-total-metrics {
+    gap: 4px 12px;
 }
 
 #token_monitor_panel .tm-metrics {
@@ -196,6 +198,65 @@
 #token_monitor_panel .tm-metric b {
     font-weight: 600;
 }
+
+/* ---------- tabs ---------- */
+
+#token_monitor_panel .tm-tabbar {
+    display: flex;
+    gap: 6px;
+    padding: 3px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    flex: 0 0 auto;
+}
+
+#token_monitor_panel .tm-tab {
+    flex: 1 1 0;
+    appearance: none;
+    border: 1px solid transparent;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    padding: 6px 8px;
+    border-radius: 9px;
+    cursor: pointer;
+    opacity: 0.72;
+    transition: background 0.15s, opacity 0.15s, border-color 0.15s;
+}
+
+#token_monitor_panel .tm-tab:hover {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+#token_monitor_panel .tm-tab.tm-active {
+    opacity: 1;
+    background: linear-gradient(140deg, rgba(122, 140, 255, 0.5), rgba(90, 110, 220, 0.28));
+    border-color: rgba(150, 165, 255, 0.5);
+    box-shadow: 0 4px 14px rgba(110, 130, 255, 0.3);
+}
+
+/* ---------- panes ---------- */
+
+#token_monitor_panel .tm-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+    flex: 1 1 auto;
+}
+
+#token_monitor_panel .tm-pane.tm-hidden {
+    display: none;
+}
+
+#token_monitor_panel .tm-pane-summary {
+    overflow-y: auto;
+}
+
+/* ---------- category cards ---------- */
 
 #token_monitor_panel .tm-cats {
     display: grid;
@@ -245,34 +306,104 @@
     gap: 2px 8px;
 }
 
-/* ---------- request list ---------- */
+/* ---------- filter chips ---------- */
 
-#token_monitor_panel .tm-list {
+#token_monitor_panel .tm-filters {
     display: flex;
-    flex-direction: column;
-    min-height: 0;
-    flex: 1 1 auto;
+    flex-wrap: wrap;
+    gap: 6px;
+    flex: 0 0 auto;
 }
 
-#token_monitor_panel .tm-list-title {
+#token_monitor_panel .tm-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: rgba(255, 255, 255, 0.06);
+    color: inherit;
+    font: inherit;
+    font-size: 11px;
     font-weight: 600;
-    opacity: 0.85;
-    padding: 0 2px 6px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
+
+#token_monitor_panel .tm-filter-chip:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(150, 165, 255, 0.4);
+}
+
+#token_monitor_panel .tm-filter-chip.tm-active {
+    background: linear-gradient(140deg, rgba(122, 140, 255, 0.55), rgba(90, 110, 220, 0.32));
+    border-color: rgba(150, 165, 255, 0.78);
+    box-shadow: 0 3px 12px rgba(110, 130, 255, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+
+#token_monitor_panel .tm-filter-count {
+    min-width: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.28);
+    font-size: 10px;
+    line-height: 15px;
+    text-align: center;
+}
+
+#token_monitor_panel .tm-filter-check {
+    color: #b6ffb0;
+    font-weight: 700;
+}
+
+#token_monitor_panel .tm-filter-status {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex: 0 0 auto;
+    padding: 5px 10px;
+    border-radius: 10px;
+    background: rgba(122, 140, 255, 0.16);
+    border: 1px solid rgba(150, 165, 255, 0.35);
+    font-size: 11px;
+}
+
+#token_monitor_panel .tm-filter-status.tm-hidden {
+    display: none;
+}
+
+#token_monitor_panel .tm-filter-clear {
+    appearance: none;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.08);
+    color: inherit;
+    font: inherit;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+#token_monitor_panel .tm-filter-clear:hover {
+    background: rgba(255, 90, 90, 0.28);
+    border-color: rgba(255, 120, 120, 0.5);
+}
+
+/* ---------- request list ---------- */
 
 #token_monitor_panel .tm-requests {
     overflow-y: auto;
     min-height: 40px;
-    max-height: 30vh;
     flex: 1 1 auto;
     padding-right: 3px;
     display: flex;
     flex-direction: column;
     gap: 8px;
-}
-
-#token_monitor_panel.tm-resized .tm-requests {
-    max-height: none;
 }
 
 #token_monitor_panel .tm-request {
@@ -407,7 +538,9 @@
     display: flex;
     flex-direction: column;
     border-radius: 16px;
-    background: linear-gradient(165deg, rgba(38, 42, 76, 0.97), rgba(19, 21, 42, 0.97));
+    background: linear-gradient(165deg,
+        rgba(var(--tm-bg-rgb), min(1, calc(var(--tm-bg-alpha) + 0.16))),
+        rgba(var(--tm-bg-rgb), min(1, calc(var(--tm-bg-alpha) + 0.1))));
     border: 1.5px solid rgba(122, 140, 255, 0.6);
     box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.14);
     overflow: hidden;
@@ -453,6 +586,13 @@
     opacity: 0.95;
 }
 
+#token_monitor_panel .tm-field-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+}
+
 #token_monitor_panel .tm-field input,
 #token_monitor_panel .tm-field select,
 #token_monitor_panel .tm-field textarea {
@@ -477,6 +617,47 @@
 #token_monitor_panel .tm-price-status {
     opacity: 0.7;
     font-size: 11px;
+}
+
+/* ---------- appearance controls ---------- */
+
+#token_monitor_panel .tm-settings-section {
+    margin-top: 4px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.14);
+    font-weight: 700;
+    opacity: 0.9;
+}
+
+#token_monitor_panel .tm-color-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+#token_monitor_panel .tm-color-row .text_pole {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+#token_monitor_panel .tm-color-swatch {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2);
+}
+
+#token_monitor_panel .tm-opacity-value {
+    float: right;
+    opacity: 0.75;
+    font-weight: 400;
+}
+
+#token_monitor_panel .tm-range {
+    width: 100%;
+    accent-color: #7a8cff;
 }
 
 #token_monitor_panel .tm-actions {
@@ -566,7 +747,7 @@
     font-size: 12px;
     line-height: 1.4;
     background: linear-gradient(165deg, rgba(38, 42, 76, 0.98), rgba(19, 21, 42, 0.98));
-    color: var(--SmartThemeBodyColor, #eaeaea);
+    color: #eaeaea;
     border: 1px solid rgba(150, 165, 255, 0.4);
     border-radius: 12px;
     box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55);
