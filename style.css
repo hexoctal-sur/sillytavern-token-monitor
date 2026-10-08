@@ -538,9 +538,11 @@
     display: flex;
     flex-direction: column;
     border-radius: 16px;
-    background: linear-gradient(165deg,
-        rgba(var(--tm-bg-rgb), min(1, calc(var(--tm-bg-alpha) + 0.16))),
-        rgba(var(--tm-bg-rgb), min(1, calc(var(--tm-bg-alpha) + 0.1))));
+    /* The settings page is always fully opaque: the opacity slider only affects
+       the panel behind it, never the settings surface itself. */
+    background:
+        linear-gradient(165deg, rgba(122, 140, 255, 0.12), rgba(122, 140, 255, 0.02)),
+        rgb(var(--tm-bg-rgb));
     border: 1.5px solid rgba(122, 140, 255, 0.6);
     box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.14);
     overflow: hidden;
@@ -603,7 +605,17 @@
     border-radius: 12px;
     border: 1px solid rgba(255, 255, 255, 0.18);
     background: rgba(255, 255, 255, 0.08);
-    color: inherit;
+    /* ST's own input styling can force a dark text colour; keep our inputs
+       readable on the dark surface and follow the configured font colour. */
+    color: var(--tm-font, #eaeaea) !important;
+    -webkit-text-fill-color: var(--tm-font, #eaeaea);
+}
+
+#token_monitor_panel .tm-field input::placeholder,
+#token_monitor_panel .tm-field textarea::placeholder {
+    color: var(--tm-font, #eaeaea);
+    opacity: 0.5;
+    -webkit-text-fill-color: var(--tm-font, #eaeaea);
 }
 
 #token_monitor_panel .tm-field input:focus,
