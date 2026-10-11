@@ -705,6 +705,52 @@
     pointer-events: none;
 }
 
+/* ---------- help (touch-friendly fallback for the native hover tooltips) ---------- */
+
+#token_monitor_panel .tm-help {
+    margin-top: 2px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    overflow: hidden;
+}
+
+#token_monitor_panel .tm-help > summary {
+    cursor: pointer;
+    padding: 8px 10px;
+    font-weight: 600;
+    list-style: none;
+    user-select: none;
+}
+
+#token_monitor_panel .tm-help > summary::-webkit-details-marker {
+    display: none;
+}
+
+#token_monitor_panel .tm-help > summary::before {
+    content: '▸';
+    display: inline-block;
+    margin-right: 6px;
+    transition: transform 0.15s;
+}
+
+#token_monitor_panel .tm-help[open] > summary::before {
+    transform: rotate(90deg);
+}
+
+#token_monitor_panel .tm-help-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 0 10px 10px;
+    font-size: 11px;
+    opacity: 0.92;
+}
+
+#token_monitor_panel .tm-help-body b {
+    font-weight: 700;
+}
+
 /* ---------- resize handles ---------- */
 
 #token_monitor_panel .tm-resize {

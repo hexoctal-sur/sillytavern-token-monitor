@@ -392,12 +392,22 @@ function buildPanelSkeleton() {
                 </label>
                 <div class="tm-price-status" id="tm-price-status">未加载价格库</div>
                 <div class="tm-actions">
-                    <div id="tm-save-settings" class="menu_button">💾 保存设置</div>
-                    <div id="tm-update-prices" class="menu_button">🔄 更新价格库</div>
-                    <div id="tm-recount" class="menu_button">🧮 重新统计</div>
-                    <div id="tm-refresh" class="menu_button">🔃 刷新</div>
-                    <div id="tm-clear" class="menu_button tm-danger">🗑 清空本聊天</div>
+                    <div id="tm-save-settings" class="menu_button" title="保存模型、汇率、分类标记与外观设置，并按新配置重新计算全部请求的费用">💾 保存设置</div>
+                    <div id="tm-update-prices" class="menu_button" title="从 LiteLLM 官方价格库拉取最新模型价格并缓存到本地（需联网）">🔄 更新价格库</div>
+                    <div id="tm-recount" class="menu_button" title="按当前聊天内容重新分词，统计所有楼层的 token 消耗">🧮 重新统计</div>
+                    <div id="tm-refresh" class="menu_button" title="重新扫描附加调用（剧情 / 填表）窗口并刷新面板显示">🔃 刷新</div>
+                    <div id="tm-clear" class="menu_button tm-danger" title="清空当前聊天的全部 token 统计，操作不可恢复，需输入确认">🗑 清空本聊天</div>
                 </div>
+                <details class="tm-help">
+                    <summary>❓ 按钮说明</summary>
+                    <div class="tm-help-body">
+                        <div><b>💾 保存设置</b>：保存模型、汇率、分类标记与外观设置，并按新配置重新计算全部请求的费用。</div>
+                        <div><b>🔄 更新价格库</b>：从 LiteLLM 官方价格库拉取最新模型价格并缓存到本地（需联网）。</div>
+                        <div><b>🧮 重新统计</b>：按当前聊天内容重新分词，统计所有楼层的 token 消耗。</div>
+                        <div><b>🔃 刷新</b>：重新扫描附加调用（剧情 / 填表）窗口并刷新面板显示。</div>
+                        <div><b>🗑 清空本聊天</b>：清空当前聊天的全部 token 统计，操作不可恢复，需输入「清空」确认。</div>
+                    </div>
+                </details>
             </div>
         </div>
         <div class="tm-resize tm-resize-bl" title="拖拽调整大小"></div>
