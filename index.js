@@ -1249,11 +1249,7 @@ function resolvePrice(model) {
   }
   return { found: false };
 }
-function computeCost({ input, output, cachedInput = 0, cacheWriteInput = 0, model, rate = 1 }) {
-  const price = resolvePrice(model);
-  if (!price.found) {
-    return { found: false, cost: null, usd: null, price };
-  }
+function computeCostFromPrice({ input, output, cachedInput = 0, cacheWriteInput = 0, price, rate = 1 }) {
   const toCount = (value) => {
     const num = Number(value);
     return Number.isFinite(num) && num > 0 ? num : 0;
@@ -1267,6 +1263,61 @@ function computeCost({ input, output, cachedInput = 0, cacheWriteInput = 0, mode
   const cacheWriteCost = Number.isFinite(price.cacheWriteCost) ? price.cacheWriteCost : price.inputCost;
   const usd = uncachedInput * price.inputCost + cached * cacheReadCost + written * cacheWriteCost + totalOutput * price.outputCost;
   return { found: true, cost: usd * (Number(rate) || 1), usd, price };
+}
+function computeCost({ input, output, cachedInput = 0, cacheWriteInput = 0, model, rate = 1 }) {
+  const price = resolvePrice(model);
+  if (!price.found) {
+    return { found: false, cost: null, usd: null, price };
+  }
+  return computeCostFromPrice({ input, output, cachedInput, cacheWriteInput, price, rate });
+}
+function toPerToken(value) {
+  if (value === "" || value === null || value === void 0) {
+    return null;
+  }
+  const num = Number(value);
+  return Number.isFinite(num) ? num / 1e6 : null;
+}
+function customPrice(custom) {
+  return {
+    inputCost: toPerToken(custom.input) ?? 0,
+    outputCost: toPerToken(custom.output) ?? 0,
+    cacheReadCost: toPerToken(custom.cacheRead),
+    cacheWriteCost: toPerToken(custom.cacheWrite)
+  };
+}
+function findCustomModel(list, lowerName) {
+  if (!Array.isArray(list) || !lowerName) {
+    return null;
+  }
+  return list.find((item) => item && item.enabled !== false && String(item.name ?? "").trim().toLowerCase() === lowerName) ?? null;
+}
+function findRedirectTarget(list, lowerName) {
+  if (!Array.isArray(list) || !lowerName) {
+    return "";
+  }
+  const hit = list.find((item) => item && String(item.from ?? "").trim().toLowerCase() === lowerName);
+  return hit ? String(hit.to ?? "").trim() : "";
+}
+function resolveBillingTarget(model, { customModels = [], modelRedirects = [] } = {}) {
+  const name = String(model ?? "").trim();
+  const lower = name.toLowerCase();
+  if (!lower) {
+    return { found: false };
+  }
+  const custom = findCustomModel(customModels, lower);
+  if (custom) {
+    return { found: true, type: "custom", model: custom.name, price: customPrice(custom), redirectedFrom: null };
+  }
+  const target = findRedirectTarget(modelRedirects, lower);
+  if (target) {
+    const customTarget = findCustomModel(customModels, target.toLowerCase());
+    if (customTarget) {
+      return { found: true, type: "custom", model: customTarget.name, price: customPrice(customTarget), redirectedFrom: name };
+    }
+    return { found: true, type: "catalogue", model: target, price: null, redirectedFrom: name };
+  }
+  return { found: false };
 }
 
 // src/combo.js
@@ -1451,7 +1502,9 @@ var defaultSettings = Object.freeze({
   requestFilter: null,
   fontColor: DEFAULT_FONT_COLOR,
   bgColor: DEFAULT_BG_COLOR,
-  bgOpacity: DEFAULT_BG_OPACITY
+  bgOpacity: DEFAULT_BG_OPACITY,
+  modelRedirects: [],
+  customModels: []
 });
 var AUX_MODEL_SETTINGS = { plot: "plotModel", fill: "fillModel", other: "fillModel" };
 var bound = false;
@@ -1594,13 +1647,30 @@ function recordCost(entry, rate, settings) {
   if (auto && auto !== configured && auto !== entry.model) {
     candidates.push({ model: auto, source: "auto" });
   }
+  const billing = {
+    customModels: settings.customModels,
+    modelRedirects: settings.modelRedirects
+  };
   for (const candidate of candidates) {
-    const result = computeCost({ ...usage, model: candidate.model });
+    const target = resolveBillingTarget(candidate.model, billing);
+    let result;
+    let pricingModel = candidate.model;
+    let redirectedFrom = null;
+    if (target.found && target.type === "custom") {
+      result = computeCostFromPrice({ ...usage, price: target.price });
+      pricingModel = target.model;
+      redirectedFrom = target.redirectedFrom;
+    } else {
+      const model = target.found ? target.model : candidate.model;
+      result = computeCost({ ...usage, model });
+      pricingModel = model;
+      redirectedFrom = target.found ? target.redirectedFrom : null;
+    }
     if (result.found) {
-      return { found: true, cost: result.cost, source: candidate.source, pricingModel: candidate.model };
+      return { found: true, cost: result.cost, source: candidate.source, pricingModel, redirectedFrom };
     }
   }
-  return { found: false, cost: null, source: null, pricingModel: "" };
+  return { found: false, cost: null, source: null, pricingModel: "", redirectedFrom: null };
 }
 function sumRecordsCost(entries, rate, settings) {
   let cost = 0;
@@ -1723,6 +1793,14 @@ function buildPanelSkeleton() {
                     <span class="tm-field-label">窗口透明度 <span class="tm-opacity-value" id="tm-opacity-value">82%</span></span>
                     <input id="tm-set-opacity" class="tm-range" type="range" min="0" max="100" step="1">
                 </label>
+                <div class="tm-settings-section">🔀 模型重定向</div>
+                <div class="tm-subnote">把「读取到的模型名」按目标模型的费率计费（例：deepseek-v4-flash → deepseek-v4.1-flash）</div>
+                <div class="tm-model-list" id="tm-redirect-list"></div>
+                <button type="button" class="menu_button tm-add" id="tm-add-redirect">＋ 添加重定向</button>
+                <div class="tm-settings-section">🧩 自定义模型</div>
+                <div class="tm-subnote">读取到的模型名完全一致且「启用」时，按自定义费率计费（单价单位：美元 / 百万 token）</div>
+                <div class="tm-model-list" id="tm-custom-list"></div>
+                <button type="button" class="menu_button tm-add" id="tm-add-custom">＋ 添加自定义模型</button>
                 <div class="tm-price-status" id="tm-price-status">未加载价格库</div>
                 <div class="tm-actions">
                     <div id="tm-save-settings" class="menu_button" title="保存模型、汇率、分类标记与外观设置，并按新配置重新计算全部请求的费用">💾 保存设置</div>
@@ -1917,6 +1995,128 @@ function bindResize(panel) {
     saveSettings();
   });
 }
+function normalizeRedirects(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item) => item && typeof item === "object").map((item) => ({ from: String(item.from ?? ""), to: String(item.to ?? "") }));
+}
+function normalizeCustomModels(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item) => item && typeof item === "object").map((item) => ({
+    name: String(item.name ?? ""),
+    input: item.input ?? "",
+    output: item.output ?? "",
+    cacheRead: item.cacheRead ?? "",
+    cacheWrite: item.cacheWrite ?? "",
+    enabled: item.enabled !== false
+  }));
+}
+function redirectRowHtml(row) {
+  return `
+        <div class="tm-model-row tm-redirect-row">
+            <input class="text_pole tm-in-from" type="text" placeholder="读取到的模型名" value="${escapeHtml2(row.from)}" spellcheck="false">
+            <span class="tm-arrow">→</span>
+            <input class="text_pole tm-in-to" type="text" placeholder="计费模型名" value="${escapeHtml2(row.to)}" spellcheck="false">
+            <button type="button" class="tm-row-del" title="删除该行" aria-label="删除">✕</button>
+        </div>`;
+}
+function customRowHtml(row) {
+  return `
+        <div class="tm-model-row tm-custom-row">
+            <input class="text_pole tm-in-name" type="text" placeholder="模型名（需完全一致）" value="${escapeHtml2(row.name)}" spellcheck="false">
+            <label class="tm-mini tm-in-enabled-wrap" title="启用后该模型才按自定义费率计费">
+                <input type="checkbox" class="tm-in-enabled"${row.enabled ? " checked" : ""}> 启用
+            </label>
+            <input class="text_pole tm-in-num tm-in-input" type="number" min="0" step="0.000001" placeholder="输入价 /百万" value="${escapeHtml2(row.input)}">
+            <input class="text_pole tm-in-num tm-in-output" type="number" min="0" step="0.000001" placeholder="输出价 /百万" value="${escapeHtml2(row.output)}">
+            <input class="text_pole tm-in-num tm-in-cache-read" type="number" min="0" step="0.000001" placeholder="缓存读价（可选）" value="${escapeHtml2(row.cacheRead)}">
+            <input class="text_pole tm-in-num tm-in-cache-write" type="number" min="0" step="0.000001" placeholder="缓存写价（可选）" value="${escapeHtml2(row.cacheWrite)}">
+            <button type="button" class="tm-row-del" title="删除该行" aria-label="删除">✕</button>
+        </div>`;
+}
+function renderRedirects(rows) {
+  const container = document.getElementById("tm-redirect-list");
+  if (!container) {
+    return;
+  }
+  container.innerHTML = rows.length ? rows.map(redirectRowHtml).join("") : '<div class="tm-model-empty">暂无重定向</div>';
+}
+function renderCustomModels(rows) {
+  const container = document.getElementById("tm-custom-list");
+  if (!container) {
+    return;
+  }
+  container.innerHTML = rows.length ? rows.map(customRowHtml).join("") : '<div class="tm-model-empty">暂无自定义模型</div>';
+}
+function readRedirectsFromDom() {
+  const container = document.getElementById("tm-redirect-list");
+  if (!container) {
+    return [];
+  }
+  return [...container.querySelectorAll(".tm-redirect-row")].map((row) => ({
+    from: row.querySelector(".tm-in-from")?.value.trim() ?? "",
+    to: row.querySelector(".tm-in-to")?.value.trim() ?? ""
+  }));
+}
+function readCustomModelsFromDom() {
+  const container = document.getElementById("tm-custom-list");
+  if (!container) {
+    return [];
+  }
+  return [...container.querySelectorAll(".tm-custom-row")].map((row) => ({
+    name: row.querySelector(".tm-in-name")?.value.trim() ?? "",
+    input: row.querySelector(".tm-in-input")?.value.trim() ?? "",
+    output: row.querySelector(".tm-in-output")?.value.trim() ?? "",
+    cacheRead: row.querySelector(".tm-in-cache-read")?.value.trim() ?? "",
+    cacheWrite: row.querySelector(".tm-in-cache-write")?.value.trim() ?? "",
+    enabled: row.querySelector(".tm-in-enabled")?.checked !== false
+  }));
+}
+function rowIndex(container, target) {
+  const row = target.closest(".tm-model-row");
+  return row ? [...container.children].indexOf(row) : -1;
+}
+function bindModelListEditors(settings) {
+  renderRedirects(normalizeRedirects(settings.modelRedirects));
+  renderCustomModels(normalizeCustomModels(settings.customModels));
+  const redirectList = document.getElementById("tm-redirect-list");
+  document.getElementById("tm-add-redirect").addEventListener("click", () => {
+    const rows = readRedirectsFromDom();
+    rows.push({ from: "", to: "" });
+    renderRedirects(rows);
+  });
+  redirectList.addEventListener("click", (event) => {
+    if (!event.target.closest(".tm-row-del")) {
+      return;
+    }
+    const rows = readRedirectsFromDom();
+    const index = rowIndex(redirectList, event.target);
+    if (index >= 0) {
+      rows.splice(index, 1);
+    }
+    renderRedirects(rows);
+  });
+  const customList = document.getElementById("tm-custom-list");
+  document.getElementById("tm-add-custom").addEventListener("click", () => {
+    const rows = readCustomModelsFromDom();
+    rows.push({ name: "", input: "", output: "", cacheRead: "", cacheWrite: "", enabled: true });
+    renderCustomModels(rows);
+  });
+  customList.addEventListener("click", (event) => {
+    if (!event.target.closest(".tm-row-del")) {
+      return;
+    }
+    const rows = readCustomModelsFromDom();
+    const index = rowIndex(customList, event.target);
+    if (index >= 0) {
+      rows.splice(index, 1);
+    }
+    renderCustomModels(rows);
+  });
+}
 function bindSettingsInputs() {
   const settings = getSettings();
   const markers = loadMarkers();
@@ -1964,6 +2164,7 @@ function bindSettingsInputs() {
   bgColorInput.addEventListener("input", previewTheme);
   opacityInput.addEventListener("input", previewTheme);
   combos = [modelInput, plotModelInput, fillModelInput].map((input) => attachModelCombo(input));
+  bindModelListEditors(settings);
   document.getElementById("tm-save-settings").addEventListener("click", handleSaveSettings);
   document.getElementById("tm-update-prices").addEventListener("click", handleUpdatePrices);
   document.getElementById("tm-refresh").addEventListener("click", () => {
@@ -2046,6 +2247,8 @@ function handleSaveSettings() {
   current.fontColor = normalizeHexColor(document.getElementById("tm-set-font-color").value) || DEFAULT_FONT_COLOR;
   current.bgColor = normalizeHexColor(document.getElementById("tm-set-bg-color").value) || DEFAULT_BG_COLOR;
   current.bgOpacity = clampSize(Number(document.getElementById("tm-set-opacity").value), 0, 100);
+  current.modelRedirects = readRedirectsFromDom().filter((item) => item.from && item.to);
+  current.customModels = readCustomModelsFromDom().filter((item) => item.name);
   saveSettings();
   saveMarkers({
     plotMarkers: parseMarkers(document.getElementById("tm-set-plot-markers").value),
@@ -2227,7 +2430,7 @@ function renderRequests() {
     }
     const priced = recordCost(entry, rate, settings);
     const costText = priced.found ? formatCost(priced.cost, rate) : "—";
-    const costTitle = !priced.found ? "未能在价格库中匹配到模型，无法计价" : priced.source === "captured" ? entry.model || "" : `按 ${priced.pricingModel} 计价${entry.model ? `（请求模型：${entry.model}）` : ""}`;
+    const costTitle = !priced.found ? "未能在价格库中匹配到模型，无法计价" : priced.redirectedFrom ? `按 ${priced.pricingModel} 计价（已从 ${priced.redirectedFrom} 重定向）` : priced.source === "captured" ? entry.model || "" : `按 ${priced.pricingModel} 计价${entry.model ? `（请求模型：${entry.model}）` : ""}`;
     const floorText = floorKnown ? `${entry.floor}楼` : "未归层";
     const modelText = entry.model || "—";
     const input = entry.input ?? 0;

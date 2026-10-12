@@ -263,7 +263,8 @@ export function resolvePrice(model) {
 }
 
 /**
- * Compute the cost of a usage in the display currency.
+ * Cost of a usage given an explicit price entry (per-token USD rates).
+ * Shared by the catalogue path and the user-defined custom models.
  *
  * Prompt caching is priced per traffic class: cached input tokens are billed at
  * the (much cheaper) cache-read rate, cache writes at the cache-creation rate,
@@ -271,14 +272,11 @@ export function resolvePrice(model) {
  * in `prompt_tokens` (OpenAI/DeepSeek style) or report it exclusively
  * (Anthropic style) — both are normalized here.
  *
- * @param {{ input?: number, output?: number, cachedInput?: number, cacheWriteInput?: number, model?: string, rate?: number }} params
+ * @param {{ input?: number, output?: number, cachedInput?: number, cacheWriteInput?: number,
+ *           price: { inputCost: number, outputCost: number, cacheReadCost?: number|null, cacheWriteCost?: number|null },
+ *           rate?: number }} params
  */
-export function computeCost({ input, output, cachedInput = 0, cacheWriteInput = 0, model, rate = 1 }) {
-    const price = resolvePrice(model);
-    if (!price.found) {
-        return { found: false, cost: null, usd: null, price };
-    }
-
+export function computeCostFromPrice({ input, output, cachedInput = 0, cacheWriteInput = 0, price, rate = 1 }) {
     const toCount = (value) => {
         const num = Number(value);
         return Number.isFinite(num) && num > 0 ? num : 0;
@@ -293,8 +291,8 @@ export function computeCost({ input, output, cachedInput = 0, cacheWriteInput = 
         ? totalInput - cached - written
         : totalInput;
 
-    // Models without a cache price in the catalogue pay the plain input rate
-    // for every traffic class (no discount, same as pre-cache accounting).
+    // Models without a cache price pay the plain input rate for every traffic
+    // class (no discount, same as pre-cache accounting).
     const cacheReadCost = Number.isFinite(price.cacheReadCost) ? price.cacheReadCost : price.inputCost;
     const cacheWriteCost = Number.isFinite(price.cacheWriteCost) ? price.cacheWriteCost : price.inputCost;
 
@@ -304,4 +302,95 @@ export function computeCost({ input, output, cachedInput = 0, cacheWriteInput = 
         + totalOutput * price.outputCost;
 
     return { found: true, cost: usd * (Number(rate) || 1), usd, price };
+}
+
+/**
+ * Compute the cost of a usage in the display currency.
+ * @param {{ input?: number, output?: number, cachedInput?: number, cacheWriteInput?: number, model?: string, rate?: number }} params
+ */
+export function computeCost({ input, output, cachedInput = 0, cacheWriteInput = 0, model, rate = 1 }) {
+    const price = resolvePrice(model);
+    if (!price.found) {
+        return { found: false, cost: null, usd: null, price };
+    }
+    return computeCostFromPrice({ input, output, cachedInput, cacheWriteInput, price, rate });
+}
+
+/* ------------------------------------------------------------------ *
+ * Custom models + redirects
+ *
+ * Both are user settings applied *before* the catalogue lookup, so a chat that
+ * used many different models can be billed per model instead of one global
+ * override:
+ *  - a custom model whose name matches exactly (and is enabled) is billed with
+ *    the user's own per-token rates;
+ *  - a redirect maps a captured model name onto another model name, which is
+ *    then billed with the target's rates (catalogue or custom).
+ * ------------------------------------------------------------------ */
+
+function toPerToken(value) {
+    if (value === '' || value === null || value === undefined) {
+        return null;
+    }
+    const num = Number(value);
+    return Number.isFinite(num) ? num / 1_000_000 : null;
+}
+
+function customPrice(custom) {
+    return {
+        inputCost: toPerToken(custom.input) ?? 0,
+        outputCost: toPerToken(custom.output) ?? 0,
+        cacheReadCost: toPerToken(custom.cacheRead),
+        cacheWriteCost: toPerToken(custom.cacheWrite),
+    };
+}
+
+function findCustomModel(list, lowerName) {
+    if (!Array.isArray(list) || !lowerName) {
+        return null;
+    }
+    return list.find(item => item
+        && item.enabled !== false
+        && String(item.name ?? '').trim().toLowerCase() === lowerName) ?? null;
+}
+
+function findRedirectTarget(list, lowerName) {
+    if (!Array.isArray(list) || !lowerName) {
+        return '';
+    }
+    const hit = list.find(item => item && String(item.from ?? '').trim().toLowerCase() === lowerName);
+    return hit ? String(hit.to ?? '').trim() : '';
+}
+
+/**
+ * Resolve how a captured model name should be billed.
+ *
+ * @param {string} model captured model name
+ * @param {{ customModels?: Array, modelRedirects?: Array }} settings
+ * @returns {{ found: false }
+ *   | { found: true, type: 'custom', model: string, price: object, redirectedFrom: string|null }
+ *   | { found: true, type: 'catalogue', model: string, price: null, redirectedFrom: string|null }}
+ */
+export function resolveBillingTarget(model, { customModels = [], modelRedirects = [] } = {}) {
+    const name = String(model ?? '').trim();
+    const lower = name.toLowerCase();
+    if (!lower) {
+        return { found: false };
+    }
+
+    const custom = findCustomModel(customModels, lower);
+    if (custom) {
+        return { found: true, type: 'custom', model: custom.name, price: customPrice(custom), redirectedFrom: null };
+    }
+
+    const target = findRedirectTarget(modelRedirects, lower);
+    if (target) {
+        const customTarget = findCustomModel(customModels, target.toLowerCase());
+        if (customTarget) {
+            return { found: true, type: 'custom', model: customTarget.name, price: customPrice(customTarget), redirectedFrom: name };
+        }
+        return { found: true, type: 'catalogue', model: target, price: null, redirectedFrom: name };
+    }
+
+    return { found: false };
 }
