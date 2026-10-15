@@ -277,11 +277,11 @@ function recordCost(entry, rate, settings) {
         }
 
         if (result.found) {
-            return { found: true, cost: result.cost, source: candidate.source, pricingModel, redirectedFrom };
+            return { found: true, cost: result.cost, source: candidate.source, pricingModel, redirectedFrom, price: result.price };
         }
     }
 
-    return { found: false, cost: null, source: null, pricingModel: '', redirectedFrom: null };
+    return { found: false, cost: null, source: null, pricingModel: '', redirectedFrom: null, price: null };
 }
 
 function sumRecordsCost(entries, rate, settings) {
@@ -1040,6 +1040,40 @@ function formatCacheRate(cached, input) {
     return `${Math.min(100, (hit / total) * 100).toFixed(1)}%`;
 }
 
+/** Per-token price → human readable "$x.xx / 百万 token". */
+function formatRatePerMillion(perToken) {
+    if (!Number.isFinite(perToken)) {
+        return null;
+    }
+    const perMillion = perToken * 1e6;
+    let text = perMillion.toFixed(4).replace(/\.?0+$/, '');
+    if (!text) {
+        text = '0';
+    }
+    return `$${text} / 百万 token`;
+}
+
+/** Tooltip for the per-request model name: the rates actually used to bill it. */
+function modelPriceTooltip(priced) {
+    const price = priced.price ?? {};
+    const cacheRead = Number.isFinite(price.cacheReadCost)
+        ? formatRatePerMillion(price.cacheReadCost)
+        : '同输入价';
+    const cacheWrite = Number.isFinite(price.cacheWriteCost)
+        ? formatRatePerMillion(price.cacheWriteCost)
+        : '同输入价';
+
+    const lines = [`模型：${priced.pricingModel || '—'}`];
+    if (priced.redirectedFrom) {
+        lines.push(`（已从 ${priced.redirectedFrom} 重定向）`);
+    }
+    lines.push(`输入：${formatRatePerMillion(price.inputCost) ?? '—'}`);
+    lines.push(`输出：${formatRatePerMillion(price.outputCost) ?? '—'}`);
+    lines.push(`缓存读：${cacheRead}`);
+    lines.push(`缓存写：${cacheWrite}`);
+    return lines.join('\n');
+}
+
 function metricsHtml(totals) {
     return `
         <span class="tm-metric">⬇️ <b>${formatNumber(totals.input)}</b></span>
@@ -1194,6 +1228,9 @@ function renderRequests() {
 
         const floorText = floorKnown ? `${entry.floor}楼` : '未归层';
         const modelText = entry.model || '—';
+        const modelTitle = priced.found
+            ? modelPriceTooltip(priced)
+            : `${modelText}（未匹配到价格库，无法计价）`;
         const input = entry.input ?? 0;
         const cached = entry.cachedInput ?? 0;
 
@@ -1210,7 +1247,7 @@ function renderRequests() {
                     <span class="tm-metric">📈 <b>${formatCacheRate(cached, input)}</b></span>
                 </div>
                 <div class="tm-request-foot">
-                    <span class="tm-request-model" title="${escapeHtml(modelText)}">🤖 ${escapeHtml(modelText)}</span>
+                    <span class="tm-request-model" title="${escapeHtml(modelTitle)}">🤖 ${escapeHtml(modelText)}</span>
                     <span class="tm-request-cost" title="${escapeHtml(costTitle)}">💲 ${costText}</span>
                 </div>
             </div>`;
@@ -1222,11 +1259,49 @@ function renderRequests() {
         if (floor === '') {
             return;
         }
-        row.addEventListener('click', () => {
-            const target = document.querySelector(`.mes[mesid="${floor}"]`);
-            target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        });
+        row.addEventListener('click', () => scrollChatToFloor(floor));
     });
+}
+
+/**
+ * Scroll the chat to a floor, aligning the message to the top of SillyTavern's
+ * chat container (#chat).
+ *
+ * `element.scrollIntoView()` is deliberately avoided: it also scrolls outer
+ * containers of SillyTavern's fixed layout and, with `block: 'center'`, lands in
+ * the middle of the message and pushes the whole page (input box included) up,
+ * leaving blank space at the bottom. Scrolling only #chat keeps the rest of the
+ * layout untouched.
+ */
+function scrollChatToFloor(floor) {
+    const target = document.querySelector(`.mes[mesid="${floor}"]`);
+    if (!target) {
+        return;
+    }
+
+    const chat = document.getElementById('chat');
+    if (chat && chat.scrollHeight > chat.clientHeight) {
+        const offset = target.getBoundingClientRect().top - chat.getBoundingClientRect().top;
+        const top = Math.max(0, chat.scrollTop + offset);
+        if (typeof chat.scrollTo === 'function') {
+            chat.scrollTo({ top, behavior: 'smooth' });
+        } else {
+            chat.scrollTop = top;
+        }
+        return;
+    }
+
+    // Fall back to the nearest scrollable ancestor, still aligned to the top.
+    let scroller = target.parentElement;
+    while (scroller && scroller !== document.body) {
+        const style = window.getComputedStyle(scroller);
+        if (/(auto|scroll|overlay)/.test(style.overflowY) && scroller.scrollHeight > scroller.clientHeight) {
+            const offset = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+            scroller.scrollTop = Math.max(0, scroller.scrollTop + offset);
+            return;
+        }
+        scroller = scroller.parentElement;
+    }
 }
 
 export function refreshPanel() {
