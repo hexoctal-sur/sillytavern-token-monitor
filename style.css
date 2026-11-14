@@ -63,6 +63,14 @@
     user-select: none;
 }
 
+/* While the appearance slider/colour input is being dragged, drop the backdrop
+   blur: re-compositing a 24px blur on every animation frame is what made fast
+   drags stutter. The blur is restored as soon as the drag ends. */
+#token_monitor_panel.tm-theme-dragging {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+
 /* once the user has resized it, the panel follows the explicit size */
 #token_monitor_panel.tm-resized {
     max-height: none;

@@ -1607,19 +1607,35 @@ function hexToRgb(hex) {
   const value = parseInt(normalized.slice(1), 16);
   return { r: value >> 16 & 255, g: value >> 8 & 255, b: value & 255 };
 }
-function applyThemeValues(panel, { fontColor, bgColor, bgOpacity }) {
+function applyThemeValues(panel, { fontColor, bgColor, bgOpacity } = {}) {
   if (!panel) {
     return;
   }
-  const font = normalizeHexColor(fontColor) || DEFAULT_FONT_COLOR;
-  const bg = hexToRgb(bgColor) || hexToRgb(DEFAULT_BG_COLOR);
-  const opacity = clampSize(Number(bgOpacity ?? DEFAULT_BG_OPACITY), 0, 100) / 100;
-  panel.style.setProperty("--tm-font", font);
-  panel.style.setProperty("--tm-bg-rgb", `${bg.r}, ${bg.g}, ${bg.b}`);
-  panel.style.setProperty("--tm-bg-alpha", String(opacity));
+  if (fontColor !== void 0) {
+    panel.style.setProperty("--tm-font", normalizeHexColor(fontColor) || DEFAULT_FONT_COLOR);
+  }
+  if (bgColor !== void 0) {
+    const bg = hexToRgb(bgColor) || hexToRgb(DEFAULT_BG_COLOR);
+    panel.style.setProperty("--tm-bg-rgb", `${bg.r}, ${bg.g}, ${bg.b}`);
+  }
+  if (bgOpacity !== void 0) {
+    const opacity = clampSize(Number(bgOpacity), 0, 100) / 100;
+    panel.style.setProperty("--tm-bg-alpha", String(opacity));
+  }
+}
+function storedTheme() {
+  const settings = getSettings();
+  return {
+    fontColor: normalizeHexColor(settings.fontColor) || DEFAULT_FONT_COLOR,
+    bgColor: normalizeHexColor(settings.bgColor) || DEFAULT_BG_COLOR,
+    bgOpacity: clampSize(Number(settings.bgOpacity ?? DEFAULT_BG_OPACITY), 0, 100)
+  };
 }
 function applyPanelTheme(panel = document.getElementById(PANEL_ID)) {
-  applyThemeValues(panel, getSettings());
+  if (!panel) {
+    return;
+  }
+  applyThemeValues(panel, storedTheme());
 }
 function configuredModelFor(kind, settings) {
   if (kind === "main") {
@@ -2146,6 +2162,22 @@ function bindSettingsInputs() {
   opacityValue.textContent = `${opacityInput.value}%`;
   fontSwatch.style.background = fontColorInput.value;
   bgSwatch.style.background = bgColorInput.value;
+  let themeFrame = 0;
+  let pendingTheme = null;
+  const commitTheme = () => {
+    themeFrame = 0;
+    const values = pendingTheme;
+    pendingTheme = null;
+    if (!values) {
+      return;
+    }
+    const current = getSettings();
+    current.fontColor = values.fontColor;
+    current.bgColor = values.bgColor;
+    current.bgOpacity = values.bgOpacity;
+    applyThemeValues(document.getElementById(PANEL_ID), values);
+    saveSettings();
+  };
   const previewTheme = () => {
     const font = normalizeHexColor(fontColorInput.value) || DEFAULT_FONT_COLOR;
     const bg = normalizeHexColor(bgColorInput.value) || DEFAULT_BG_COLOR;
@@ -2154,15 +2186,25 @@ function bindSettingsInputs() {
     fontSwatch.style.background = font;
     bgSwatch.style.background = bg;
     opacityValue.textContent = `${opacityInput.value}%`;
-    applyThemeValues(document.getElementById(PANEL_ID), {
-      fontColor: font,
-      bgColor: bg,
-      bgOpacity: Number(opacityInput.value)
-    });
+    pendingTheme = { fontColor: font, bgColor: bg, bgOpacity: Number(opacityInput.value) };
+    if (themeFrame) {
+      return;
+    }
+    themeFrame = typeof requestAnimationFrame === "function" ? requestAnimationFrame(commitTheme) : setTimeout(commitTheme, 16);
   };
   fontColorInput.addEventListener("input", previewTheme);
   bgColorInput.addEventListener("input", previewTheme);
   opacityInput.addEventListener("input", previewTheme);
+  const panel = document.getElementById(PANEL_ID);
+  const endThemeDrag = () => panel?.classList.remove("tm-theme-dragging");
+  for (const input of [fontColorInput, bgColorInput, opacityInput]) {
+    input.addEventListener("pointerdown", () => panel?.classList.add("tm-theme-dragging"));
+    input.addEventListener("pointerup", endThemeDrag);
+    input.addEventListener("pointercancel", endThemeDrag);
+    input.addEventListener("blur", endThemeDrag);
+  }
+  window.addEventListener("pointerup", endThemeDrag);
+  window.addEventListener("pointercancel", endThemeDrag);
   combos = [modelInput, plotModelInput, fillModelInput].map((input) => attachModelCombo(input));
   bindModelListEditors(settings);
   document.getElementById("tm-save-settings").addEventListener("click", handleSaveSettings);

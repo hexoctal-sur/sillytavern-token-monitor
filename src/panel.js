@@ -187,22 +187,43 @@ function hexToRgb(hex) {
     return { r: (value >> 16) & 255, g: (value >> 8) & 255, b: value & 255 };
 }
 
-/** Push the given colours onto the panel via CSS custom properties. */
-function applyThemeValues(panel, { fontColor, bgColor, bgOpacity }) {
+/**
+ * Push the given colours onto the panel via CSS custom properties.
+ * Only the provided keys are written, so the opacity slider does not have to
+ * touch the colour variables on every input event.
+ */
+function applyThemeValues(panel, { fontColor, bgColor, bgOpacity } = {}) {
     if (!panel) {
         return;
     }
-    const font = normalizeHexColor(fontColor) || DEFAULT_FONT_COLOR;
-    const bg = hexToRgb(bgColor) || hexToRgb(DEFAULT_BG_COLOR);
-    const opacity = clampSize(Number(bgOpacity ?? DEFAULT_BG_OPACITY), 0, 100) / 100;
+    if (fontColor !== undefined) {
+        panel.style.setProperty('--tm-font', normalizeHexColor(fontColor) || DEFAULT_FONT_COLOR);
+    }
+    if (bgColor !== undefined) {
+        const bg = hexToRgb(bgColor) || hexToRgb(DEFAULT_BG_COLOR);
+        panel.style.setProperty('--tm-bg-rgb', `${bg.r}, ${bg.g}, ${bg.b}`);
+    }
+    if (bgOpacity !== undefined) {
+        const opacity = clampSize(Number(bgOpacity), 0, 100) / 100;
+        panel.style.setProperty('--tm-bg-alpha', String(opacity));
+    }
+}
 
-    panel.style.setProperty('--tm-font', font);
-    panel.style.setProperty('--tm-bg-rgb', `${bg.r}, ${bg.g}, ${bg.b}`);
-    panel.style.setProperty('--tm-bg-alpha', String(opacity));
+/** The appearance values currently stored in the settings. */
+function storedTheme() {
+    const settings = getSettings();
+    return {
+        fontColor: normalizeHexColor(settings.fontColor) || DEFAULT_FONT_COLOR,
+        bgColor: normalizeHexColor(settings.bgColor) || DEFAULT_BG_COLOR,
+        bgOpacity: clampSize(Number(settings.bgOpacity ?? DEFAULT_BG_OPACITY), 0, 100),
+    };
 }
 
 function applyPanelTheme(panel = document.getElementById(PANEL_ID)) {
-    applyThemeValues(panel, getSettings());
+    if (!panel) {
+        return;
+    }
+    applyThemeValues(panel, storedTheme());
 }
 
 /* ------------------------------------------------------------------ *
@@ -461,8 +482,9 @@ function bindPanelEvents(panel) {
     const settingsPage = document.getElementById('tm-settings-page');
     const toggleSettings = (open) => {
         settingsPage.classList.toggle('tm-hidden', !open);
+        // Appearance is applied and persisted live, so closing the page must
+        // not revert it; re-syncing keeps the panel in line with the settings.
         if (!open) {
-            // drop any unsaved live preview by re-applying the stored theme
             applyPanelTheme(panel);
         }
     };
@@ -833,8 +855,31 @@ function bindSettingsInputs() {
     fontSwatch.style.background = fontColorInput.value;
     bgSwatch.style.background = bgColorInput.value;
 
-    // The appearance fields preview live on the panel while typing; closing the
-    // settings page without saving restores the stored theme.
+    // Appearance is applied immediately and persisted on change (unlike the model
+    // fields, which are a draft until 保存设置): a slider drag or hex edit then
+    // survives closing/reopening the settings page and a browser reload.
+    //
+    // Input events are coalesced into one animation frame — writing CSS custom
+    // properties on every `input` event made fast drags stutter and could leave
+    // the slider behind the cursor.
+    let themeFrame = 0;
+    let pendingTheme = null;
+
+    const commitTheme = () => {
+        themeFrame = 0;
+        const values = pendingTheme;
+        pendingTheme = null;
+        if (!values) {
+            return;
+        }
+        const current = getSettings();
+        current.fontColor = values.fontColor;
+        current.bgColor = values.bgColor;
+        current.bgOpacity = values.bgOpacity;
+        applyThemeValues(document.getElementById(PANEL_ID), values);
+        saveSettings();
+    };
+
     const previewTheme = () => {
         const font = normalizeHexColor(fontColorInput.value) || DEFAULT_FONT_COLOR;
         const bg = normalizeHexColor(bgColorInput.value) || DEFAULT_BG_COLOR;
@@ -843,15 +888,32 @@ function bindSettingsInputs() {
         fontSwatch.style.background = font;
         bgSwatch.style.background = bg;
         opacityValue.textContent = `${opacityInput.value}%`;
-        applyThemeValues(document.getElementById(PANEL_ID), {
-            fontColor: font,
-            bgColor: bg,
-            bgOpacity: Number(opacityInput.value),
-        });
+
+        pendingTheme = { fontColor: font, bgColor: bg, bgOpacity: Number(opacityInput.value) };
+        if (themeFrame) {
+            return;
+        }
+        themeFrame = typeof requestAnimationFrame === 'function'
+            ? requestAnimationFrame(commitTheme)
+            : setTimeout(commitTheme, 16);
     };
     fontColorInput.addEventListener('input', previewTheme);
     bgColorInput.addEventListener('input', previewTheme);
     opacityInput.addEventListener('input', previewTheme);
+
+    // Dropping the backdrop blur for the duration of the interaction keeps the
+    // slider responsive; it is restored immediately afterwards.
+    const panel = document.getElementById(PANEL_ID);
+    const endThemeDrag = () => panel?.classList.remove('tm-theme-dragging');
+    for (const input of [fontColorInput, bgColorInput, opacityInput]) {
+        input.addEventListener('pointerdown', () => panel?.classList.add('tm-theme-dragging'));
+        input.addEventListener('pointerup', endThemeDrag);
+        input.addEventListener('pointercancel', endThemeDrag);
+        input.addEventListener('blur', endThemeDrag);
+    }
+    // the pointer may be released outside the slider, so also listen globally
+    window.addEventListener('pointerup', endThemeDrag);
+    window.addEventListener('pointercancel', endThemeDrag);
 
     // The form is only a draft: nothing is stored or applied until 保存设置
     // is pressed, which also re-prices every request with the new models/rate.
