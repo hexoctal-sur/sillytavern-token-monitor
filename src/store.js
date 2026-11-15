@@ -216,10 +216,14 @@ export function patchRequest(id, fields) {
         entry.floor = Number.isInteger(fields.floor) ? fields.floor : null;
     }
     if ('input' in fields) {
-        entry.input = Number.isFinite(Number(fields.input)) ? Number(fields.input) : null;
+        entry.input = fields.input === null
+            ? null
+            : (Number.isFinite(Number(fields.input)) ? Number(fields.input) : null);
     }
     if ('output' in fields) {
-        entry.output = Number.isFinite(Number(fields.output)) ? Number(fields.output) : null;
+        entry.output = fields.output === null
+            ? null
+            : (Number.isFinite(Number(fields.output)) ? Number(fields.output) : null);
     }
     if ('cachedInput' in fields) {
         entry.cachedInput = Math.max(0, toNumber(fields.cachedInput));

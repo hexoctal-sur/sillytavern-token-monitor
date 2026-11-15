@@ -304,10 +304,10 @@ function patchRequest(id, fields) {
     entry.floor = Number.isInteger(fields.floor) ? fields.floor : null;
   }
   if ("input" in fields) {
-    entry.input = Number.isFinite(Number(fields.input)) ? Number(fields.input) : null;
+    entry.input = fields.input === null ? null : Number.isFinite(Number(fields.input)) ? Number(fields.input) : null;
   }
   if ("output" in fields) {
-    entry.output = Number.isFinite(Number(fields.output)) ? Number(fields.output) : null;
+    entry.output = fields.output === null ? null : Number.isFinite(Number(fields.output)) ? Number(fields.output) : null;
   }
   if ("cachedInput" in fields) {
     entry.cachedInput = Math.max(0, toNumber(fields.cachedInput));
@@ -1916,6 +1916,36 @@ function buildPanelSkeleton() {
                 <div class="tm-subnote">读取到的模型名完全一致且「启用」时，按自定义费率计费（单价单位：美元 / 百万 token）</div>
                 <div class="tm-model-list" id="tm-custom-list"></div>
                 <button type="button" class="menu_button tm-add" id="tm-add-custom">＋ 添加自定义模型</button>
+                <div class="tm-settings-section">🛠 批量修正数值</div>
+                <div class="tm-subnote">用于修复历史记录（例如渠道未返回 usage 时记下的错误输入）；新产生的记录会自动使用 API 的真实数值</div>
+                <div class="tm-batch-row">
+                    <label class="tm-field tm-field-inline">类型
+                        <select id="tm-batch-kind" class="text_pole">
+                            <option value="all">全部</option>
+                            <option value="main">主生成</option>
+                            <option value="plot">剧情推进</option>
+                            <option value="fill">填表</option>
+                            <option value="other">其他</option>
+                        </select>
+                    </label>
+                    <label class="tm-field tm-field-inline">字段
+                        <select id="tm-batch-field" class="text_pole">
+                            <option value="input">输入</option>
+                            <option value="output">输出</option>
+                            <option value="cachedInput">缓存命中</option>
+                            <option value="cacheWriteInput">缓存写入</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="tm-batch-row">
+                    <label class="tm-field tm-field-inline">仅当当前值 =
+                        <input id="tm-batch-match" class="text_pole" type="number" min="0" step="1" placeholder="留空 = 不限">
+                    </label>
+                    <label class="tm-field tm-field-inline">新值
+                        <input id="tm-batch-value" class="text_pole" type="number" min="0" step="1" placeholder="必填">
+                    </label>
+                </div>
+                <button type="button" class="menu_button tm-add" id="tm-batch-apply">应用批量修正</button>
                 <div class="tm-price-status" id="tm-price-status">未加载价格库</div>
                 <div class="tm-actions">
                     <div id="tm-save-settings" class="menu_button" title="保存模型、汇率、分类标记与外观设置，并按新配置重新计算全部请求的费用">💾 保存设置</div>
@@ -1961,6 +1991,7 @@ function bindPanelEvents(panel) {
   panel.querySelector(".tm-settings-close").addEventListener("click", () => toggleSettings(false));
   bindTabbar(panel);
   bindFilters(panel);
+  bindRequestEvents(panel);
   setActiveTab(panel, getSettings().activeTab, { persist: false });
   applyPanelTheme(panel);
   bindDrag(panel);
@@ -2317,6 +2348,7 @@ function bindSettingsInputs() {
     refreshPanel();
   });
   document.getElementById("tm-clear").addEventListener("click", handleClearChat);
+  document.getElementById("tm-batch-apply").addEventListener("click", handleBatchFix);
 }
 async function handleClearChat() {
   const confirmed = await confirmChatClear();
@@ -2418,6 +2450,57 @@ async function handleUpdatePrices() {
     button?.classList.remove("disabled");
     updatePriceStatus();
     refreshPanel();
+  }
+}
+function handleBatchFix() {
+  const kind = document.getElementById("tm-batch-kind").value;
+  const field = document.getElementById("tm-batch-field").value;
+  const matchRaw = document.getElementById("tm-batch-match").value.trim();
+  const valueRaw = document.getElementById("tm-batch-value").value.trim();
+  const allowed = ["input", "output", "cachedInput", "cacheWriteInput"];
+  if (!allowed.includes(field)) {
+    return;
+  }
+  if (valueRaw === "") {
+    if (typeof toastr !== "undefined") {
+      toastr.warning("请填写「新值」");
+    }
+    return;
+  }
+  const value = Number(valueRaw);
+  if (!Number.isFinite(value) || value < 0) {
+    if (typeof toastr !== "undefined") {
+      toastr.warning("「新值」必须是不小于 0 的数字");
+    }
+    return;
+  }
+  const match = matchRaw === "" ? null : Number(matchRaw);
+  if (match !== null && (!Number.isFinite(match) || match < 0)) {
+    if (typeof toastr !== "undefined") {
+      toastr.warning("「仅当当前值」必须是不小于 0 的数字");
+    }
+    return;
+  }
+  let changed = 0;
+  for (const entry of listRequests()) {
+    const entryKind = entry.kind in KIND_META ? entry.kind : "other";
+    if (kind !== "all" && entryKind !== kind) {
+      continue;
+    }
+    const current = entry[field];
+    if (match !== null && (current ?? null) !== match) {
+      continue;
+    }
+    patchRequest(entry.id, { [field]: Math.round(value) });
+    changed += 1;
+  }
+  refreshPanel();
+  if (typeof toastr !== "undefined") {
+    if (changed > 0) {
+      toastr.success(`已修正 ${changed} 条记录`);
+    } else {
+      toastr.warning("没有匹配的记录");
+    }
   }
 }
 function updatePriceStatus() {
@@ -2603,10 +2686,13 @@ function renderRequests() {
     const input = entry.input ?? 0;
     const cached = entry.cachedInput ?? 0;
     return `
-            <div class="tm-request" data-floor="${floorKnown ? entry.floor : ""}">
+            <div class="tm-request" data-floor="${floorKnown ? entry.floor : ""}" data-id="${entry.id}">
                 <div class="tm-request-head">
                     <span class="tm-request-kind"><span class="tm-badge tm-badge-${kind}">${meta2.emoji} ${meta2.short}</span><span class="tm-request-floor">📍 ${floorText}${regen}</span></span>
-                    <span class="tm-request-time">🕐 ${formatRequestTime(entry.ts)}</span>
+                    <span class="tm-request-head-right">
+                        <span class="tm-request-time">🕐 ${formatRequestTime(entry.ts)}</span>
+                        <button type="button" class="tm-row-edit" data-action="edit" title="编辑这条记录的 token 数值">✏️</button>
+                    </span>
                 </div>
                 <div class="tm-metrics tm-request-metrics">
                     <span class="tm-metric">⬇️ <b>${entry.input === null ? "—" : formatNumber(entry.input)}</b></span>
@@ -2618,16 +2704,94 @@ function renderRequests() {
                     <span class="tm-request-model" title="${escapeHtml2(modelTitle)}">🤖 ${escapeHtml2(modelText)}</span>
                     <span class="tm-request-cost" title="${escapeHtml2(costTitle)}">💲 ${costText}</span>
                 </div>
+                <div class="tm-request-editor tm-hidden">
+                    <label class="tm-edit-field">输入
+                        <input class="text_pole tm-edit-input" type="number" min="0" step="1" placeholder="未知" value="${entry.input ?? ""}">
+                    </label>
+                    <label class="tm-edit-field">输出
+                        <input class="text_pole tm-edit-output" type="number" min="0" step="1" placeholder="未知" value="${entry.output ?? ""}">
+                    </label>
+                    <label class="tm-edit-field">缓存命中
+                        <input class="text_pole tm-edit-cached" type="number" min="0" step="1" value="${entry.cachedInput ?? 0}">
+                    </label>
+                    <label class="tm-edit-field">缓存写入
+                        <input class="text_pole tm-edit-cache-write" type="number" min="0" step="1" value="${entry.cacheWriteInput ?? 0}">
+                    </label>
+                    <div class="tm-edit-actions">
+                        <span class="tm-edit-hint">留空 = 未知</span>
+                        <button type="button" class="tm-edit-btn tm-edit-save" data-action="edit-save">保存</button>
+                        <button type="button" class="tm-edit-btn" data-action="edit-cancel">取消</button>
+                    </div>
+                </div>
             </div>`;
   }).reverse();
   container.innerHTML = rows.join("");
-  container.querySelectorAll(".tm-request").forEach((row) => {
-    const floor = row.getAttribute("data-floor");
-    if (floor === "") {
+}
+function bindRequestEvents(panel) {
+  const container = document.getElementById("tm-requests");
+  if (!container) {
+    return;
+  }
+  container.addEventListener("click", (event) => {
+    const card = event.target.closest(".tm-request");
+    if (!card) {
       return;
     }
-    row.addEventListener("click", () => scrollChatToFloor(floor));
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action === "edit") {
+      const editor = card.querySelector(".tm-request-editor");
+      editor?.classList.toggle("tm-hidden");
+      event.stopPropagation();
+      return;
+    }
+    if (action === "edit-cancel") {
+      card.querySelector(".tm-request-editor")?.classList.add("tm-hidden");
+      return;
+    }
+    if (action === "edit-save") {
+      saveRequestEdits(card);
+      return;
+    }
+    if (event.target.closest(".tm-request-editor")) {
+      return;
+    }
+    const floor = card.getAttribute("data-floor");
+    if (floor !== "" && floor !== null) {
+      scrollChatToFloor(floor);
+    }
   });
+}
+function readEditedCount(input, { allowNull = false } = {}) {
+  const raw = String(input?.value ?? "").trim();
+  if (raw === "") {
+    return allowNull ? null : 0;
+  }
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num < 0) {
+    return void 0;
+  }
+  return Math.round(num);
+}
+function saveRequestEdits(card) {
+  const id = Number(card.getAttribute("data-id"));
+  if (!Number.isFinite(id)) {
+    return;
+  }
+  const input = readEditedCount(card.querySelector(".tm-edit-input"), { allowNull: true });
+  const output = readEditedCount(card.querySelector(".tm-edit-output"), { allowNull: true });
+  const cachedInput = readEditedCount(card.querySelector(".tm-edit-cached"));
+  const cacheWriteInput = readEditedCount(card.querySelector(".tm-edit-cache-write"));
+  if ([input, output, cachedInput, cacheWriteInput].some((value) => value === void 0)) {
+    if (typeof toastr !== "undefined") {
+      toastr.warning("请输入不小于 0 的整数");
+    }
+    return;
+  }
+  patchRequest(id, { input, output, cachedInput, cacheWriteInput });
+  refreshPanel();
+  if (typeof toastr !== "undefined") {
+    toastr.success("该条记录已更新");
+  }
 }
 function scrollChatToFloor(floor) {
   const target = document.querySelector(`.mes[mesid="${floor}"]`);
