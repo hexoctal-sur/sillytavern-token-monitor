@@ -1210,7 +1210,8 @@ function isValidPriceData(data) {
     if (!value || typeof value !== "object") {
       continue;
     }
-    if ("input_cost_per_token" in value && "max_tokens" in value) {
+    const hasPrice = Number.isFinite(Number(value.input_cost_per_token)) || Number.isFinite(Number(value.output_cost_per_token));
+    if (hasPrice) {
       valid += 1;
       if (valid >= MIN_VALID_ENTRIES) {
         return true;

@@ -73,6 +73,14 @@ async function idbSet(key, value) {
  * Catalogue
  * ------------------------------------------------------------------ */
 
+/**
+ * Validate a downloaded catalogue.
+ *
+ * LiteLLM used to include `max_tokens` on every entry; that field was removed
+ * from the schema (only `max_input_tokens` / `max_output_tokens` remain), so
+ * requiring it rejected perfectly good downloads as "invalid price data".
+ * Accept any entry that carries a numeric token price.
+ */
 function isValidPriceData(data) {
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
         return false;
@@ -82,7 +90,9 @@ function isValidPriceData(data) {
         if (!value || typeof value !== 'object') {
             continue;
         }
-        if ('input_cost_per_token' in value && 'max_tokens' in value) {
+        const hasPrice = Number.isFinite(Number(value.input_cost_per_token))
+            || Number.isFinite(Number(value.output_cost_per_token));
+        if (hasPrice) {
             valid += 1;
             if (valid >= MIN_VALID_ENTRIES) {
                 return true;
