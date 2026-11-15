@@ -94,12 +94,21 @@ async function countMsgTokens(messages) {
   return total;
 }
 async function countRequestTokens(generateData) {
-  const raw = generateData?.prompt ?? generateData?.messages ?? generateData?.input ?? null;
+  const raw = generateData?.prompt ?? generateData?.messages ?? generateData?.contents ?? generateData?.input ?? null;
   if (Array.isArray(raw)) {
     return countMsgTokens(raw);
   }
   if (typeof raw === "string" && raw.length > 0) {
     return countTokensCached(raw);
+  }
+  if (raw && typeof raw === "object") {
+    const nested = raw.messages ?? raw.contents ?? raw.prompt ?? null;
+    if (Array.isArray(nested)) {
+      return countMsgTokens(nested);
+    }
+    if (typeof nested === "string" && nested.length > 0) {
+      return countTokensCached(nested);
+    }
   }
   return null;
 }
@@ -119,18 +128,26 @@ function extractUsageTokens(usage) {
   if (!usage || typeof usage !== "object") {
     return null;
   }
+  const gemini = usage.usageMetadata && typeof usage.usageMetadata === "object" ? usage.usageMetadata : "promptTokenCount" in usage || "candidatesTokenCount" in usage ? usage : null;
   const details = usage.prompt_tokens_details ?? usage.input_tokens_details ?? {};
-  let input = firstFinite(usage.prompt_tokens, usage.input_tokens);
-  const output = firstFinite(usage.completion_tokens, usage.output_tokens);
+  let input = firstFinite(usage.prompt_tokens, usage.input_tokens, gemini?.promptTokenCount);
+  let output = firstFinite(usage.completion_tokens, usage.output_tokens, gemini?.candidatesTokenCount);
   const cachedInput = firstFinite(
     usage.cache_read_input_tokens,
     usage.prompt_cache_hit_tokens,
     usage.cached_tokens,
     details.cached_tokens,
     usage.cached_content_token_count,
-    usage.cachedContentTokenCount
+    usage.cachedContentTokenCount,
+    gemini?.cachedContentTokenCount
   ) ?? 0;
   const cacheWriteInput = firstFinite(usage.cache_creation_input_tokens) ?? 0;
+  if (output !== null && gemini) {
+    const thoughts = firstFinite(gemini.thoughtsTokenCount);
+    if (thoughts !== null) {
+      output += thoughts;
+    }
+  }
   const exclusive = usage.input_tokens !== void 0 && usage.prompt_tokens === void 0;
   if (input !== null && exclusive) {
     input = input + cachedInput + cacheWriteInput;
@@ -864,61 +881,135 @@ function resolveCategory(record) {
   }
   return "other";
 }
-async function readSse(response) {
-  let text = "";
-  let usage = null;
-  const reader = response.body?.getReader?.();
-  if (!reader) {
-    return { text, usage };
+function tryParseJson(value) {
+  if (typeof value !== "string") {
+    return null;
   }
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) {
-        continue;
-      }
-      const payload = trimmed.slice(5).trim();
-      if (!payload || payload === "[DONE]") {
-        continue;
-      }
-      try {
-        const chunk = JSON.parse(payload);
-        const delta = chunk?.choices?.[0]?.delta?.content;
-        if (typeof delta === "string") {
-          text += delta;
-        }
-        if (chunk?.usage) {
-          usage = chunk.usage;
-        }
-      } catch {
-      }
-    }
+  const text = value.trim();
+  if (!text || text[0] !== "{" && text[0] !== "[") {
+    return null;
   }
-  return { text, usage };
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
-function collectResponse(response, onDone) {
-  const clone = response.clone();
-  const contentType = clone.headers?.get?.("content-type") ?? "";
-  if (contentType.includes("text/event-stream")) {
-    void readSse(clone).then(({ text, usage }) => onDone({ text, usage })).catch(() => onDone({ text: "", usage: null }));
+function deltaText(delta) {
+  if (!delta || typeof delta !== "object") {
+    return "";
+  }
+  let out = "";
+  if (typeof delta.content === "string") {
+    out += delta.content;
+  } else if (Array.isArray(delta.content)) {
+    out += contentToText(delta.content);
+  }
+  if (typeof delta.reasoning_content === "string") {
+    out += delta.reasoning_content;
+  } else if (typeof delta.reasoning === "string") {
+    out += delta.reasoning;
+  }
+  if (Array.isArray(delta.tool_calls)) {
+    for (const call of delta.tool_calls) {
+      const args = call?.function?.arguments;
+      if (typeof args === "string") {
+        out += args;
+      } else if (args != null) {
+        out += JSON.stringify(args);
+      }
+    }
+  }
+  return out;
+}
+function absorbChunk(state, chunk) {
+  if (!chunk || typeof chunk !== "object") {
     return;
   }
-  void clone.json().then((payload) => {
-    const content = payload?.choices?.[0]?.message?.content;
-    onDone({
-      text: typeof content === "string" ? content : content == null ? "" : JSON.stringify(content),
-      usage: payload?.usage ?? null
-    });
-  }).catch(() => onDone({ text: "", usage: null }));
+  if (chunk.data && typeof chunk.data === "object" && (chunk.data.choices || chunk.data.usage)) {
+    absorbChunk(state, chunk.data);
+    return;
+  }
+  const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : null;
+  if (choice) {
+    state.text += deltaText(choice.delta);
+    const messageContent = choice.message?.content;
+    if (typeof messageContent === "string") {
+      state.text += messageContent;
+    } else if (Array.isArray(messageContent)) {
+      state.text += contentToText(messageContent);
+    }
+    if (typeof choice.text === "string") {
+      state.text += choice.text;
+    }
+    if (Array.isArray(choice.message?.tool_calls)) {
+      for (const call of choice.message.tool_calls) {
+        const args = call?.function?.arguments;
+        if (typeof args === "string") {
+          state.text += args;
+        }
+      }
+    }
+  }
+  if (Array.isArray(chunk.candidates)) {
+    for (const candidate of chunk.candidates) {
+      const parts = candidate?.content?.parts;
+      if (Array.isArray(parts)) {
+        state.text += contentToText(parts);
+      }
+    }
+  }
+  if (chunk.usage && typeof chunk.usage === "object") {
+    state.usage = chunk.usage;
+  } else if (chunk.usageMetadata && typeof chunk.usageMetadata === "object") {
+    state.usage = chunk.usageMetadata;
+  }
+}
+function parseResponseBody(raw) {
+  const source = typeof raw === "string" ? raw : "";
+  const state = { text: "", usage: null };
+  if (!source.trim()) {
+    return state;
+  }
+  const single = tryParseJson(source);
+  if (single) {
+    absorbChunk(state, single);
+    return state;
+  }
+  let sawSse = false;
+  for (const line of source.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith(":") || /^(event|id|retry):/.test(trimmed)) {
+      continue;
+    }
+    let payload;
+    if (trimmed.startsWith("data:")) {
+      sawSse = true;
+      payload = trimmed.slice(5).trim();
+    } else if (!sawSse) {
+      payload = trimmed;
+    } else {
+      continue;
+    }
+    if (!payload || payload === "[DONE]" || payload === "DONE") {
+      continue;
+    }
+    const chunk = tryParseJson(payload);
+    if (chunk) {
+      absorbChunk(state, chunk);
+    }
+  }
+  return state;
+}
+function collectResponse(response, onDone) {
+  let clone;
+  try {
+    clone = response.clone();
+  } catch {
+    onDone({ text: "", usage: null });
+    return;
+  }
+  void clone.text().then((raw) => onDone(parseResponseBody(raw))).catch(() => onDone({ text: "", usage: null }));
 }
 function createWrappedFetch(original, isMainWindow) {
   return async function tokenMonitorFetch(input, init) {
@@ -932,9 +1023,12 @@ function createWrappedFetch(original, isMainWindow) {
     } catch {
       body = null;
     }
-    const interceptable = isGenerateUrl(url) && body && Array.isArray(body.messages) && body.messages.length > 0;
-    const mainCapture = isMainWindow && interceptable && typeof globalThis.__tokenMonitorClaimMainFetch === "function" && globalThis.__tokenMonitorClaimMainFetch() ? { model: typeof body.model === "string" ? body.model : "" } : null;
-    const record = !isMainWindow && interceptable ? {
+    const interceptable = isGenerateUrl(url) && Boolean(body);
+    const mainCapture = isMainWindow && interceptable && typeof globalThis.__tokenMonitorClaimMainFetch === "function" && globalThis.__tokenMonitorClaimMainFetch() ? {
+      model: typeof body?.model === "string" ? body.model : "",
+      request: body
+    } : null;
+    const record = !isMainWindow && interceptable && Array.isArray(body?.messages) && body.messages.length > 0 ? {
       seq: ++seq,
       ts: Date.now(),
       model: body.model || "",
@@ -949,7 +1043,12 @@ function createWrappedFetch(original, isMainWindow) {
     if (mainCapture) {
       collectResponse(response, ({ text, usage }) => {
         if (typeof globalThis.__tokenMonitorDeliverMainUsage === "function") {
-          void globalThis.__tokenMonitorDeliverMainUsage({ text, usage, model: mainCapture.model });
+          void globalThis.__tokenMonitorDeliverMainUsage({
+            text,
+            usage,
+            model: mainCapture.model,
+            request: mainCapture.request
+          });
         }
       });
     }
@@ -2699,13 +2798,23 @@ function claimMainFetch() {
   capture.awaitingFetch = false;
   return true;
 }
-function deliverMainUsage({ usage, model } = {}) {
+async function deliverMainUsage({ usage, model, request } = {}) {
   const capture = lastMainCapture;
   if (!capture) {
     return;
   }
+  if (request && typeof request === "object" && !capture.wireCounted) {
+    capture.wireCounted = countRequestTokens(request);
+  }
   const tokens = extractUsageTokens(usage);
   if (!tokens || tokens.input === null && tokens.output === null) {
+    if (capture.wireCounted && capture.entry) {
+      const wireInput = await capture.wireCounted;
+      if (wireInput !== null && capture.entry.input !== wireInput) {
+        patchRequest(capture.entry.id, { input: wireInput });
+        refreshPanel();
+      }
+    }
     return;
   }
   capture.usage = {
@@ -2749,8 +2858,9 @@ async function finalizeMainRequest({ text, model, message }, index) {
     return false;
   }
   const countedInput = await capture.counted;
+  const wireInput = capture.wireCounted ? await capture.wireCounted : null;
   const usage = capture.usage;
-  const input = usage?.input ?? countedInput ?? null;
+  const input = usage?.input ?? wireInput ?? countedInput ?? null;
   const cachedInput = usage?.cachedInput ?? 0;
   const cacheWriteInput = usage?.cacheWriteInput ?? 0;
   let output = usage?.output ?? null;

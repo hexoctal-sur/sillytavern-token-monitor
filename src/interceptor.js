@@ -335,72 +335,171 @@ function resolveCategory(record) {
     return 'other';
 }
 
-async function readSse(response) {
-    let text = '';
-    let usage = null;
-    const reader = response.body?.getReader?.();
-    if (!reader) {
-        return { text, usage };
+function tryParseJson(value) {
+    if (typeof value !== 'string') {
+        return null;
     }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-            break;
-        }
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith('data:')) {
-                continue;
-            }
-            const payload = trimmed.slice(5).trim();
-            if (!payload || payload === '[DONE]') {
-                continue;
-            }
-            try {
-                const chunk = JSON.parse(payload);
-                const delta = chunk?.choices?.[0]?.delta?.content;
-                if (typeof delta === 'string') {
-                    text += delta;
-                }
-                if (chunk?.usage) {
-                    usage = chunk.usage;
-                }
-            } catch {
-                /* ignore malformed chunk */
-            }
-        }
+    const text = value.trim();
+    if (!text || (text[0] !== '{' && text[0] !== '[')) {
+        return null;
     }
-
-    return { text, usage };
+    try {
+        return JSON.parse(text);
+    } catch {
+        return null;
+    }
 }
 
-function collectResponse(response, onDone) {
-    const clone = response.clone();
-    const contentType = clone.headers?.get?.('content-type') ?? '';
+/** Text carried by one streamed delta (content, reasoning and tool arguments). */
+function deltaText(delta) {
+    if (!delta || typeof delta !== 'object') {
+        return '';
+    }
+    let out = '';
+    if (typeof delta.content === 'string') {
+        out += delta.content;
+    } else if (Array.isArray(delta.content)) {
+        out += contentToText(delta.content);
+    }
+    if (typeof delta.reasoning_content === 'string') {
+        out += delta.reasoning_content;
+    } else if (typeof delta.reasoning === 'string') {
+        out += delta.reasoning;
+    }
+    if (Array.isArray(delta.tool_calls)) {
+        for (const call of delta.tool_calls) {
+            const args = call?.function?.arguments;
+            if (typeof args === 'string') {
+                out += args;
+            } else if (args != null) {
+                out += JSON.stringify(args);
+            }
+        }
+    }
+    return out;
+}
 
-    if (contentType.includes('text/event-stream')) {
-        void readSse(clone)
-            .then(({ text, usage }) => onDone({ text, usage }))
-            .catch(() => onDone({ text: '', usage: null }));
+function absorbChunk(state, chunk) {
+    if (!chunk || typeof chunk !== 'object') {
+        return;
+    }
+    // Some proxies wrap the chunk one level deep, e.g. {"data": {"choices": ...}}
+    if (chunk.data && typeof chunk.data === 'object' && (chunk.data.choices || chunk.data.usage)) {
+        absorbChunk(state, chunk.data);
         return;
     }
 
-    void clone.json()
-        .then(payload => {
-            const content = payload?.choices?.[0]?.message?.content;
-            onDone({
-                text: typeof content === 'string' ? content : (content == null ? '' : JSON.stringify(content)),
-                usage: payload?.usage ?? null,
-            });
-        })
+    const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : null;
+    if (choice) {
+        state.text += deltaText(choice.delta);
+        const messageContent = choice.message?.content;
+        if (typeof messageContent === 'string') {
+            state.text += messageContent;
+        } else if (Array.isArray(messageContent)) {
+            state.text += contentToText(messageContent);
+        }
+        if (typeof choice.text === 'string') {
+            state.text += choice.text;
+        }
+        if (Array.isArray(choice.message?.tool_calls)) {
+            for (const call of choice.message.tool_calls) {
+                const args = call?.function?.arguments;
+                if (typeof args === 'string') {
+                    state.text += args;
+                }
+            }
+        }
+    }
+
+    // Gemini native streamGenerateContent: candidates[].content.parts[].text
+    if (Array.isArray(chunk.candidates)) {
+        for (const candidate of chunk.candidates) {
+            const parts = candidate?.content?.parts;
+            if (Array.isArray(parts)) {
+                state.text += contentToText(parts);
+            }
+        }
+    }
+
+    if (chunk.usage && typeof chunk.usage === 'object') {
+        state.usage = chunk.usage;
+    } else if (chunk.usageMetadata && typeof chunk.usageMetadata === 'object') {
+        state.usage = chunk.usageMetadata;
+    }
+}
+
+/**
+ * Parse a generate-response body.
+ *
+ * The `content-type` header cannot be trusted: several proxies stream SSE
+ * (`data: {...}` lines) while announcing `application/json`, `text/plain` or no
+ * type at all. Deciding by header alone made the whole body fall into the
+ * `JSON.parse` branch, which throws on SSE, so both the reply text and the
+ * `usage` numbers (including the final chunk shown by providers) were lost and
+ * the extension silently fell back to local counting.
+ *
+ * Instead: try the body as one JSON document, otherwise parse it as SSE/NDJSON
+ * lines. The final buffer is always flushed, so a last chunk without a trailing
+ * newline is not dropped.
+ *
+ * @param {string} raw response body
+ * @returns {{ text: string, usage: object|null }}
+ */
+export function parseResponseBody(raw) {
+    const source = typeof raw === 'string' ? raw : '';
+    const state = { text: '', usage: null };
+    if (!source.trim()) {
+        return state;
+    }
+
+    const single = tryParseJson(source);
+    if (single) {
+        absorbChunk(state, single);
+        return state;
+    }
+
+    let sawSse = false;
+    for (const line of source.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(':') || /^(event|id|retry):/.test(trimmed)) {
+            continue;
+        }
+
+        let payload;
+        if (trimmed.startsWith('data:')) {
+            sawSse = true;
+            payload = trimmed.slice(5).trim();
+        } else if (!sawSse) {
+            // NDJSON / bare JSON lines without SSE framing
+            payload = trimmed;
+        } else {
+            continue;
+        }
+
+        if (!payload || payload === '[DONE]' || payload === 'DONE') {
+            continue;
+        }
+        const chunk = tryParseJson(payload);
+        if (chunk) {
+            absorbChunk(state, chunk);
+        }
+    }
+
+    return state;
+}
+
+function collectResponse(response, onDone) {
+    let clone;
+    try {
+        clone = response.clone();
+    } catch {
+        onDone({ text: '', usage: null });
+        return;
+    }
+
+    // Read as text and sniff the format: the content-type header is unreliable.
+    void clone.text()
+        .then(raw => onDone(parseResponseBody(raw)))
         .catch(() => onDone({ text: '', usage: null }));
 }
 
@@ -417,22 +516,27 @@ function createWrappedFetch(original, isMainWindow) {
             body = null;
         }
 
-        const interceptable = isGenerateUrl(url)
-            && body
-            && Array.isArray(body.messages)
-            && body.messages.length > 0;
-
         // Main window: only the in-flight main generation is observed. Its
         // response usage (prompt_tokens/completion_tokens) is the ground truth
         // the provider bills for, so it is preferred over local counting.
+        // The request body is handed over too: `generate_data.prompt` can be
+        // incomplete for some channels (that is where a bogus constant input
+        // count came from), while the body is exactly what went over the wire.
+        const interceptable = isGenerateUrl(url) && Boolean(body);
         const mainCapture = isMainWindow
             && interceptable
             && typeof globalThis.__tokenMonitorClaimMainFetch === 'function'
             && globalThis.__tokenMonitorClaimMainFetch()
-                ? { model: typeof body.model === 'string' ? body.model : '' }
+                ? {
+                    model: typeof body?.model === 'string' ? body.model : '',
+                    request: body,
+                }
                 : null;
 
-        const record = !isMainWindow && interceptable
+        const record = !isMainWindow
+            && interceptable
+            && Array.isArray(body?.messages)
+            && body.messages.length > 0
             ? {
                 seq: ++seq,
                 ts: Date.now(),
@@ -451,7 +555,12 @@ function createWrappedFetch(original, isMainWindow) {
         if (mainCapture) {
             collectResponse(response, ({ text, usage }) => {
                 if (typeof globalThis.__tokenMonitorDeliverMainUsage === 'function') {
-                    void globalThis.__tokenMonitorDeliverMainUsage({ text, usage, model: mainCapture.model });
+                    void globalThis.__tokenMonitorDeliverMainUsage({
+                        text,
+                        usage,
+                        model: mainCapture.model,
+                        request: mainCapture.request,
+                    });
                 }
             });
         }

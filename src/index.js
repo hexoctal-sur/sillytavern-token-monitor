@@ -91,14 +91,30 @@ function claimMainFetch() {
 }
 
 /** Called by the fetch interceptor with the response's `usage` (if any). */
-function deliverMainUsage({ usage, model } = {}) {
+async function deliverMainUsage({ usage, model, request } = {}) {
     const capture = lastMainCapture;
     if (!capture) {
         return;
     }
 
+    // Count the payload that actually went over the wire. `generate_data.prompt`
+    // can be incomplete for some channels, which produced a constant bogus
+    // input count when the response usage could not be read.
+    if (request && typeof request === 'object' && !capture.wireCounted) {
+        capture.wireCounted = countRequestTokens(request);
+    }
+
     const tokens = extractUsageTokens(usage);
     if (!tokens || (tokens.input === null && tokens.output === null)) {
+        // No API usage. Still upgrade the locally counted input from the real
+        // request body if the record was already written.
+        if (capture.wireCounted && capture.entry) {
+            const wireInput = await capture.wireCounted;
+            if (wireInput !== null && capture.entry.input !== wireInput) {
+                patchRequest(capture.entry.id, { input: wireInput });
+                refreshPanel();
+            }
+        }
         return;
     }
 
@@ -152,8 +168,11 @@ async function finalizeMainRequest({ text, model, message }, index) {
     }
 
     const countedInput = await capture.counted;
+    const wireInput = capture.wireCounted ? await capture.wireCounted : null;
     const usage = capture.usage;
-    const input = usage?.input ?? countedInput ?? null;
+    // Prefer the billed usage, then the request body actually sent, then the
+    // payload published by GENERATE_AFTER_DATA.
+    const input = usage?.input ?? wireInput ?? countedInput ?? null;
     const cachedInput = usage?.cachedInput ?? 0;
     const cacheWriteInput = usage?.cacheWriteInput ?? 0;
 

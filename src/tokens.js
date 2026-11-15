@@ -152,13 +152,23 @@ export async function countMsgTokens(messages) {
  * @returns {Promise<number|null>} token count, or null when the payload is unusable
  */
 export async function countRequestTokens(generateData) {
-    const raw = generateData?.prompt ?? generateData?.messages ?? generateData?.input ?? null;
+    const raw = generateData?.prompt ?? generateData?.messages ?? generateData?.contents ?? generateData?.input ?? null;
 
     if (Array.isArray(raw)) {
         return countMsgTokens(raw);
     }
     if (typeof raw === 'string' && raw.length > 0) {
         return countTokensCached(raw);
+    }
+    if (raw && typeof raw === 'object') {
+        // some wrappers nest the payload one level down
+        const nested = raw.messages ?? raw.contents ?? raw.prompt ?? null;
+        if (Array.isArray(nested)) {
+            return countMsgTokens(nested);
+        }
+        if (typeof nested === 'string' && nested.length > 0) {
+            return countTokensCached(nested);
+        }
     }
     return null;
 }
@@ -196,9 +206,14 @@ export function extractUsageTokens(usage) {
         return null;
     }
 
+    // Gemini native usage (`usageMetadata`) may arrive at the top level.
+    const gemini = (usage.usageMetadata && typeof usage.usageMetadata === 'object')
+        ? usage.usageMetadata
+        : (('promptTokenCount' in usage || 'candidatesTokenCount' in usage) ? usage : null);
+
     const details = usage.prompt_tokens_details ?? usage.input_tokens_details ?? {};
-    let input = firstFinite(usage.prompt_tokens, usage.input_tokens);
-    const output = firstFinite(usage.completion_tokens, usage.output_tokens);
+    let input = firstFinite(usage.prompt_tokens, usage.input_tokens, gemini?.promptTokenCount);
+    let output = firstFinite(usage.completion_tokens, usage.output_tokens, gemini?.candidatesTokenCount);
     const cachedInput = firstFinite(
         usage.cache_read_input_tokens,
         usage.prompt_cache_hit_tokens,
@@ -206,8 +221,18 @@ export function extractUsageTokens(usage) {
         details.cached_tokens,
         usage.cached_content_token_count,
         usage.cachedContentTokenCount,
+        gemini?.cachedContentTokenCount,
     ) ?? 0;
     const cacheWriteInput = firstFinite(usage.cache_creation_input_tokens) ?? 0;
+
+    // Gemini reports thinking tokens separately from candidate tokens, but they
+    // are billed as output.
+    if (output !== null && gemini) {
+        const thoughts = firstFinite(gemini.thoughtsTokenCount);
+        if (thoughts !== null) {
+            output += thoughts;
+        }
+    }
 
     // Anthropic-style usage (`input_tokens`) reports cache traffic *outside* of
     // the input count; OpenAI-style (`prompt_tokens`) includes it. Normalize
